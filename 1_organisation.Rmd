@@ -1,0 +1,625 @@
+---
+title: "Data Preparation for GLMM"
+author: "James Orr"
+output:
+   html_notebook:
+     code_folding: hide
+     theme: flatly
+     toc: true
+     toc_depth: 4
+     number_sections: no
+---
+
+### Intro
+
+In this notebook I identify invertebrate samples taken during autumn in a given year and I join water quality data to these samples based on: 
+
+* **time**: average of water quality samples taken during the preceding summer (only between 10 and 3pm)
+* **space**: water quality site must be in the same river and within 1km
+
+I tried to add in flow data from the national river flow archive data but the flow sites were not matched up well enough with the invertebrate data. Luckily the discharge category associated to each invertebrate site was very well correlated with the flow data for the limited number of sites I had, so I can just use that.
+
+
+### Set-up
+
+- *Prepare R environment*
+
+```{r, results='hide'}
+# R version 4.0.2 (2020-06-22)
+
+rm(list = ls())           # clear the environment 
+
+# Packages
+library(sf)               # classes and functions for vector data
+library(raster)           # classes and functions for raster data
+library(lubridate)        # for manipulating time variables
+library(nngeo)            # for st_nn (nearest neighbour)
+library(tidyverse)        # organizing and manipulating data
+``` 
+
+- *Choose time period and "distance" between wq and invert samples* 
+
+Repeat this for all years going back to 2005. 
+
+```{r}
+summer = c(6, 7, 8)                             # June, July August
+autumn = c(9, 10, 11)                           # September, October, November
+
+# Enter year we want to save
+year <- 2019
+
+# Enter max distance between wq and invert samples (in meters)
+distance = 500
+
+```
+
+
+- *Import invertebrate data and select data from chosen year* 
+
+```{r, results="hide"}
+# Read in data about the sites 
+data_site <- read.csv("data/eco/inverts/INV_OPEN_DATA_SITE_2022-02-01.csv", 
+                     header = T)
+
+data_metrics <- read.csv("data/eco/inverts/INV_OPEN_DATA_METRICS_2022-02-01.csv", 
+                     header = T)
+
+######## Select by time #########
+
+# Change class of SAMPLE_DATE with lubridate package
+data_metrics$SAMPLE_DATE <- ymd(data_metrics$SAMPLE_DATE)
+
+# Add in a SAMPLE_DATE_MONTH column 
+data_metrics$SAMPLE_DATE_MONTH <- month(data_metrics$SAMPLE_DATE)
+
+# Inspect distribution of samples across years and months
+#hist(data_metrics$SAMPLE_DATE_MONTH, breaks = 24)
+#hist(data_metrics$SAMPLE_DATE_YEAR)
+
+# Select time period
+data_metrics <- filter(data_metrics, 
+                       SAMPLE_DATE_YEAR == year,
+                       SAMPLE_DATE_MONTH %in% autumn)
+
+# first calculate the number of times a site appears in data_metrics
+# then left join it to data_site and rewrite over the original data_site
+data_site <- data_metrics %>%
+  mutate(counts = 1) %>%
+  group_by(SITE_ID) %>%
+  summarise(SAMPLES_PER_SITE = sum(counts)) %>%
+  left_join(data_site, ., by = "SITE_ID")
+
+# update the samples per site for the filtered datasets
+data_site <- data_metrics %>%
+  mutate(counts = 1) %>%
+  group_by(SITE_ID) %>%
+  summarise(SAMPLES_PER_SITE2 = sum(counts)) %>%
+  left_join(data_site, ., by = "SITE_ID") %>%
+  select(-SAMPLES_PER_SITE) %>%
+  rename(SAMPLES_PER_SITE = SAMPLES_PER_SITE2) %>%
+  filter(SAMPLES_PER_SITE >= 1)
+```
+
+
+- *Import water quality data for chosen year* 
+
+```{r}
+# Year
+wq_data <- list.files(path = paste("data/wq/", paste(year), "/", sep = ""),
+                  pattern="*.csv",
+                  full.names = T) %>%
+  map_df(~read_csv(., col_types = cols(.default = "c"))) 
+
+```
+
+- *Import flow data and select chosen year and months* 
+
+```{r}
+# Load all flow data
+
+#flow_data <- list.files(path = "data/flow/data",
+#                  pattern="*.csv",
+#                  full.names = T) %>%
+#  map_df(~read_csv(., col_types = cols(.default = "c"))) 
+
+# Select relevant year
+
+#relevant_year = year  # have to rename object as it is the same as column 
+
+# Select time period
+
+#flow_data <- filter(flow_data, 
+#                       year == relevant_year,
+#                       month %in% summer)
+
+```
+
+
+- *Import shapefiles* 
+
+```{r, results="hide"}
+######### Thames Catchment Boundary ############
+catchment_shape <- st_read("data/geo/catch/WFD_River_Basin_Districts_Cycle_2.shp") %>%
+  # reduce the "resolution" of the shapefile 
+  st_simplify(dTolerance = 100) %>%
+  # subset the Thames catchment 
+  filter(rbd_name == "Thames")
+
+######### River shapefile ############
+rivers_shape <- st_read("data/geo/rivers/data/WatercourseLink.shp") %>%
+  # reduce the "resolution" of the shapefile 
+  #st_simplify(dTolerance = 100) %>%
+  filter(st_within(x = ., y = catchment_shape, sparse = FALSE))
+```
+
+### Organise Invertebrate Data 
+
+- *Subset sites (and samples) that are within Thames catchment* 
+
+```{r, results="hide"}
+# convert coordinates of sites to an sf object in British National Grid CRS
+data_site <-st_as_sf(data_site, coords = c("FULL_EASTING", "FULL_NORTHING")) %>%
+  st_set_crs(., 27700)
+
+# use st_within to subset sites that are wihtin the catchment 
+data_site <- filter(data_site, st_within(x = data_site, y = catchment_shape, 
+                                         sparse = FALSE))
+
+# select sites that are rivers 
+data_site <- filter(data_site, WATERBODY_TYPE_DESCRIPTION == 
+                      "RIVER: Natural/semi-natural flowing fresh watercourse")
+
+# select sites whose physical habitats are recorded (i.e. that have few NAs)
+data_site <- data_site[rowSums(is.na(data_site)) < 6, ]
+
+
+# filter the other two data frames to remove data outside the Thames catchment 
+#data_taxa <- filter(data_taxa, SITE_ID %in% data_site$SITE_ID)
+data_metrics <- filter(data_metrics, SITE_ID %in% data_site$SITE_ID)
+
+```
+
+- *Ensure samples were collected and analysed using the same methodology*
+
+```{r, results = "hide"}
+
+# next look at some frequency tables for all of the categorical variables 
+#table(data_metrics$SAMPLE_METHOD_DESCRIPTION)
+#table(data_metrics$SAMPLE_TYPE_DESCRIPTION)
+#table(data_metrics$ANALYSIS_METHOD_DESCRIPTION)
+#table(data_metrics$ANALYSIS_TYPE_DESCRIPTION)
+#table(data_metrics$SAMPLE_VERSION)
+#table(data_metrics$REPLICATE_CODE)
+#table(data_metrics$SAMPLE_REASON)
+#table(data_metrics$IS_THIRD_PARTY_DATA)
+
+# filter data so that samples are consistent 
+data_metrics <- data_metrics %>%
+  filter(SAMPLE_METHOD_DESCRIPTION == "3-MIN POND NET (BT001): 3-min active sampling, 1-min hand search as per BT001") %>%
+  filter(ANALYSIS_METHOD_DESCRIPTION == "LOG ABUNDANCE: Estimate of the log abundance (scale as  BT001)") 
+
+# update the samples per site for the filtered datasets
+data_site <- data_metrics %>%
+  mutate(counts = 1) %>%
+  group_by(SITE_ID) %>%
+  summarise(SAMPLES_PER_SITE2 = sum(counts)) %>%
+  left_join(data_site, ., by = "SITE_ID") %>%
+  select(-SAMPLES_PER_SITE) %>%
+  rename(SAMPLES_PER_SITE = SAMPLES_PER_SITE2) %>%
+  filter(SAMPLES_PER_SITE >= 1)
+```
+
+- *Join the sample information with the site information*
+
+```{r, results = "hide"}
+invert_data <- data_metrics %>%
+  left_join(data_site, ., by = "SITE_ID")
+
+# Clean environment 
+rm(data_metrics, data_site)
+```
+
+
+### Organise Water Quality Data 
+
+- *Subset samples taken from rivers*
+
+```{r}
+wq_data <- wq_data %>%
+  filter(sample.sampledMaterialType.label == "RIVER / RUNNING SURFACE WATER")
+```
+
+- *Select indicators and make sure points are in Thames catchment*
+
+```{r}
+# View the most commonly measured aspects of WQ
+wq_data %>% count(determinand.definition, sort = T) %>% top_n(100)
+
+# List of the water quality indicators we want
+WQ_INDICATORS <- c("Nitrogen, Total Oxidised as N",
+                   "pH",
+                   "Nitrite as N",
+                   "Nitrate as N",
+                   "Orthophosphate, reactive as P",
+                   "Ammoniacal Nitrogen as N",
+                   "Temperature of Water",
+                   "Oxygen, Dissolved, % Saturation",
+                   "Ammonia un-ionised as N",
+                   "Oxygen, Dissolved as O2",
+                   "Chlorophyll : Acetone Extract",
+                   "BOD : 5 Day ATU",
+                   "Phosphorus, Total as P",
+                   "Solids, Suspended at 105 C")
+
+# Select the water quality indicators I want (with help from frequency table)
+wq_data <- wq_data %>%
+  filter(determinand.definition %in% WQ_INDICATORS) %>%
+  unite(indicator_units, c(determinand.definition, determinand.unit.label))
+
+# All measures of the same indicator are in the same units, great
+# wq_data %>% count(determinand.unit.label, sort = T) %>% top_n(100) 
+
+
+# Make sure all points are within thames catchment 
+# convert coordinates of sites to an sf object in British National Grid CRS
+wq_data <-st_as_sf(wq_data, coords = c("sample.samplingPoint.easting", 
+                                       "sample.samplingPoint.northing"),
+                   remove = F) %>%
+  st_set_crs(., 27700) 
+# use st_within to subset sites that are wihtin the catchment 
+wq_data <- filter(wq_data, st_within(x = wq_data, y = catchment_shape, 
+                                         sparse = FALSE))
+wq_data <- st_drop_geometry(wq_data)
+
+# Make sure there are equal numbers of unique sampling points and geometries 
+#length(unique(interaction(wq_data$sample.samplingPoint.easting,
+#                   wq_data$sample.samplingPoint.northing)))
+#length(unique(wq_data$sample.samplingPoint.notation))
+
+
+
+```
+
+- *Convert to tidy data* 
+
+```{r}
+
+wq_data <- wq_data %>%
+  # select the variables we want and remove "@id" as this will block pivot_wider
+  select(indicator_units,
+         result,
+         sample.samplingPoint.easting,
+         sample.samplingPoint.northing,
+         sample.samplingPoint.notation,
+         sample.sampleDateTime) %>%
+  # give each water quality measure its own column
+  pivot_wider(names_from = indicator_units,
+              values_from = result)
+
+names(wq_data)
+
+```
+
+- *Select the correct time ranges* 
+
+```{r}
+
+# Change class of sample.sampleDateTime with lubridate package
+wq_data$ymd_hms <- ymd_hms(wq_data$sample.sampleDateTime)
+wq_data$month <- month(wq_data$ymd_hms)
+wq_data$hours <- hour(wq_data$ymd_hms)
+
+
+# hist(wq_data$month)
+
+
+# Select correct water quality data
+wq_data <- wq_data %>%
+  # samples taken during the summer
+  filter(month %in% summer) %>%
+  # samples taken between 10am and 3pm 
+  filter(hours %in% c(10, 11, 12, 13, 14)) 
+  
+#hist(wq_data$month)
+#hist(wq_data$hours)
+#plot(wq_data$`Temperature of Water_cel` ~ wq_data$month )
+#plot(wq_data$`Temperature of Water_cel` ~ wq_data$hours )
+
+
+# Rearrange data to prepare it for summarizing (averages for each sample)
+wq_data <- wq_data %>%
+  # remove variables that we don't want anymore
+  select(-c(ymd_hms, month, hours, sample.sampleDateTime)) %>%
+  # get group ID and eastings and northings together to save
+  unite(ID, c(sample.samplingPoint.easting,
+         sample.samplingPoint.northing,
+         sample.samplingPoint.notation)) %>%
+  # get varaibles in the correst classess
+  mutate_all(type.convert) 
+
+
+wq_data <- wq_data %>%
+  # get mean values for each indicator across all time points (removing NAs)
+  group_by(ID) %>%
+  summarise_at(names(wq_data[2:15]), mean, na.rm = TRUE) %>%
+  # separate the coordinates and sample id into separate columns 
+  separate(ID, into = c("sample.samplingPoint.easting",
+                        "sample.samplingPoint.northing",
+                        "sample.samplingPoint.notation"),
+           sep = "_")
+
+# for 2006 backwards I need to change it to 2:12 
+# there must be an entire column that is no longer being recorded - Conductivity!
+# I've just removed conductivity as this isn't something INCA predicts
+
+# for 2000 I need to change to 2:14 - need to figure out why and then remove that variable! 
+
+
+```
+
+
+
+- *Convert into spatial object*
+
+```{r}
+
+# convert coordinates of sites to an sf object in British National Grid CRS
+wq_data <-st_as_sf(wq_data, coords = c("sample.samplingPoint.easting", 
+                                       "sample.samplingPoint.northing")) %>%
+  st_set_crs(., 27700) 
+
+```
+
+
+
+### Spatially join invertebrate and water quality data
+
+- *First identify the river invertebrates and water quality samples were taken in*
+
+```{r, results = "hide"}
+
+# Join the "identifier" variable for river to invert_data
+# Select the nearest river that is within "distance" meters of the site
+invert_data <- st_join(invert_data, rivers_shape, 
+                       join = st_nn, maxdist = distance) %>%
+  # keep only "identifier" from rivers_shape
+  select(-c("name1", "startNode", "endNode", "form", "flow", 
+            "fictitious", "length", "name2"))
+
+
+
+# Join the "identifier" variable for the river to wq_data
+# Select the nearest river that is within "distance" meters of the site
+wq_data <- st_join(wq_data, rivers_shape, 
+                       join = st_nn, maxdist = distance) %>%
+  # keep only "identifier" from rivers_shape
+  select(-c("name1", "startNode", "endNode", "form", "flow", 
+            "fictitious", "length", "name2"))
+
+
+# A small note: a very small number of samples (from inverts and from wq) are..
+# .. not within 100m of a river in the shapefile I have. 
+# Has no real effect (maybe lose one or two samples), but worth noting. 
+
+```
+
+
+- *Join invertebrate and water quality data based on distance*
+
+```{r, results = "hide"}
+# For each invertebrate sample, join the nearest water quality sample... 
+# Unless there are no water quality samples within "distance" meters, then give NAs 
+combined <- st_join(invert_data, wq_data,
+                    join = st_nn, maxdist = distance)
+```
+
+
+- *Filter joint data so that both samples were taken from the same river*
+
+```{r}
+# select if river identifier.x and river identifier.y is the same 
+combined <- combined %>%
+  # remove rows that had no water quality site within "distance" meters
+  drop_na(sample.samplingPoint.notation) %>%
+  # remove rows where the river identifiers for inverts and for wq don't match
+  filter(identifier.x==identifier.y)
+```
+
+
+### Spatially join flow data with the combined invertebrate and water quality data
+
+
+- *Get mean flow values for a summer for each site* 
+
+```{r}
+#flow_data$gdf <- as.numeric(flow_data$gdf)
+
+# Calculate average flow over the summer
+#flow_data_average <- flow_data %>%
+#  group_by(site) %>%
+#  mutate(average.flow = mean(gdf)) %>%
+#  ungroup() %>%
+#  select(-c(gdf, month, day, date)) %>%
+#  distinct()
+
+# convert coordinates of sites to an sf object in British National Grid CRS
+#flow_data_average <-st_as_sf(flow_data_average, coords = c("meta.station.easting", 
+#                                       "meta.station.northing")) %>%
+#  st_set_crs(., 27700)
+```
+
+
+- *Identify the river flow samples were taken in*
+
+
+```{r}
+# Join the "identifier" variable for river to invert_data
+# Select the nearest river that is within "distance" meters of the site
+#flow_data_average <- st_join(flow_data_average, rivers_shape, 
+#                       join = st_nn, maxdist = distance) %>%
+  # keep only "identifier" from rivers_shape
+#  select(-c("name1", "startNode", "endNode", "form", "flow", 
+#            "fictitious", "length", "name2"))
+
+```
+
+
+
+
+- *Join flow to the joint invertebrate and water quality data based on distance*
+
+```{r, results = "hide"}
+# For each invertebrate sample, join the nearest water quality sample... 
+# Unless there are no water quality samples within "distance" meters, then give NAs 
+# combined.plus.flow <- st_join(combined, flow_data_average,
+#                              join = st_nn, maxdist = distance)
+```
+
+Flow data 
+
+
+- *Filter joint data so that flow samples were taken from the same river as the inverts*
+
+```{r}
+# select if river identifier.x and river identifier.y is the same 
+#combined.plus.flow <- combined.plus.flow %>%
+#  # remove rows that had no water quality site within "distance" meters
+#  drop_na(sample.samplingPoint.notation) %>%
+#  # remove rows where the river identifiers for inverts and for wq don't match
+ # filter(identifier.x==identifier)
+
+# plot(combined.plus.flow$average.flow, combined.plus.flow$DISCHARGE)
+
+## This suggests that I can use discharge! 
+```
+
+
+The flow data is not close enough to the invertebrate data. For 2010 we have 66 sites with inverts and water quality - but if we want flow as well this goes down to 9. Average flow in these 9 sites correlates very well with the discharge varible in the invert data - so I will use that data instead.
+
+
+
+### Add in details about the invertebrates
+
+```{r}
+invert_taxa <- read.csv("data/eco/inverts/INV_OPEN_DATA_TAXA_2022-02-01.csv", 
+                     header = T)
+
+# Only keep records that have an analysis ID in "combined"
+invert_taxa <- subset(invert_taxa, invert_taxa$ANALYSIS_ID %in% combined$ANALYSIS_ID)
+
+# Only keep macroinvertebrate taxa 
+invert_taxa <- subset(invert_taxa, invert_taxa$TAXON_TYPE == "Other Macroinvertebrates")
+
+# Have a look at what groups we have
+# table(invert_taxa$TAXON_GROUP_NAME)
+
+```
+
+Get abundances for the seven higher taxa showing the greatest change among classes in the Vaughan and Goetteli paper: 
+*Bivalvia, Hirudinea, Isopoda, Ephemeroptera, Plecoptera, Trichoptera, Diptera*
+
+
+Also calculate macroinvertebrate richness
+
+And get the total abundance of macroinvertebrates and also the richness of the EPT and the abundance of EPT. 
+
+So what I need now is to summarize the data so that for each analysis ID there is the abundance of the groups I'm interested in and the total macroinvertebrate richness (number of rows per analysis ID).
+
+```{r}
+# Calcuate the macro richness in each analysis
+invert_taxa_richness <- invert_taxa %>%
+  group_by(ANALYSIS_ID) %>%
+  summarise(macro_richness = n())
+
+# Calcuate the macro abundance in each analysis
+invert_taxa_total_abundance <- invert_taxa %>%
+  group_by(ANALYSIS_ID) %>%
+  summarise(total_abundance = sum(TOTAL_ABUNDANCE, na.rm = TRUE))
+
+# Sum all the abundances of the same taxon group for each analysis 
+invert_taxa_abundances <- invert_taxa %>%
+  group_by(ANALYSIS_ID, TAXON_GROUP_NAME) %>%
+  summarise(abundance = sum(TOTAL_ABUNDANCE))
+
+# Spread abundance data out each analysis is one observation, columns are groups
+invert_taxa_abundances <- invert_taxa_abundances %>%
+  pivot_wider(names_from = TAXON_GROUP_NAME, 
+              values_from = abundance) 
+
+# All NAs to 0 
+invert_taxa_abundances[is.na(invert_taxa_abundances)] <- 0
+
+# Only keep the main groups for abundances 
+invert_taxa_abundances <- select(invert_taxa_abundances, 
+                                 c("annelid",
+                                   "crustacean",
+                                   "flatworm (Turbellaria)",
+                                   "insect - beetle (Coleoptera)",
+                                   "insect - caddis fly (Trichoptera)",
+                                   "insect - dragonfly (Odonata)",
+                                   "insect - mayfly (Ephemeroptera)",
+                                   "insect - stonefly (Plecoptera)",
+                                   "insect - true fly (Diptera)",
+                                   "mollusc"))
+
+
+ept <- subset(invert_taxa, invert_taxa$TAXON_GROUP_NAME %in%
+                c("insect - mayfly (Ephemeroptera)",
+                  "insect - stonefly (Plecoptera)",
+                  "insect - caddis fly (Trichoptera)"))
+
+
+# Calcuate the ept richness in each analysis
+ept_taxa_richness <- ept %>%
+  group_by(ANALYSIS_ID) %>%
+  summarise(ept_richness = n())
+
+# Calcuate the ept abundance in each analysis
+ept_taxa_total_abundance <- ept %>%
+  group_by(ANALYSIS_ID) %>%
+  summarise(ept_abundance = sum(TOTAL_ABUNDANCE, na.rm = TRUE))
+
+
+```
+
+
+Last step is just to join the abundance and richness data to combined by Analysis ID 
+
+```{r}
+combined_full <- left_join(combined, invert_taxa_abundances,
+                           by = "ANALYSIS_ID")
+
+combined_full <- left_join(combined_full, invert_taxa_richness,
+                           by = "ANALYSIS_ID")
+
+combined_full <- left_join(combined_full, invert_taxa_total_abundance,
+                           by = "ANALYSIS_ID")
+
+combined_full <- left_join(combined_full, ept_taxa_richness,
+                           by = "ANALYSIS_ID")
+
+combined_full <- left_join(combined_full, ept_taxa_total_abundance,
+                           by = "ANALYSIS_ID")
+
+# NAs to 0 
+combined_full$ept_richness[is.na(combined_full$ept_richness)] <- 0
+combined_full$ept_abundance[is.na(combined_full$ept_abundance)] <- 0
+
+
+
+```
+
+
+
+### Save dataset for each year to analyse with GLMM
+
+```{r}
+
+# Drop geometry (confuses write.csv())
+combined_full <- st_drop_geometry(combined_full)
+
+# write out the combined dataset into a csv file 
+write.csv(combined_full, paste("data/combined/comb", 
+                          paste(year), paste(distance), ".csv", sep = "_"))
+```
+

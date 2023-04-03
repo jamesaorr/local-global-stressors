@@ -1,0 +1,898 @@
+---
+title: "Regressions for Macroinvertebrate Responses"
+author: "James Orr"
+output:
+   html_notebook:
+     code_folding: hide
+     theme: flatly
+     toc: true
+     toc_depth: 4
+     number_sections: no
+---
+
+
+## Introduction
+
+In this notebook I do a small amount of organising and exploring of the combined water quality and invert data. I then run linear mixed effects models to create some "offline" models that we can use to make predictions using the INCA model scenario outcomes. 
+
+Response variables that can be predicted by INCA are: 
+
+- Flow (m3/s)
+
+- Soluble Reactive Phosphorus (mg/l)
+
+- Chlorophyll a (mg/l)
+
+- Temperature (degrees)
+
+- Dissolved Oxygen (mg/l)
+
+- Nitrate (NO3)
+
+- Ammonium (NH4) 
+
+Phosphorus, dissolved oxygen, temperature and nitrate are all be directly incorporated into my regressions using EA data. Flow can be estimated and ammonium can be approximated using ammonia. Chlorophyll a can't be included because of insufficient data in the EA water quality dataset. 
+
+We can also include some strong predictor variables that aren't in INCA (e.g., describing habitat quality). We will also include random effect for site to account for repeated measures across years. 
+
+## Data preparation
+
+**Set up environment**
+
+```{r, echo=TRUE, results='hide'}
+#### Clear  environment 
+rm(list = ls())         
+
+#### Required packages
+library(tidyverse)        # for general use
+library(GGally)           # for ggpairs
+library(lme4)             # for lmer() function
+library(MuMIn)            # to get r squared for lme4 models
+library(lmerTest)         # to get p values for lme4 models
+library(DHARMa)           # for diagnostics of glmm models 
+
+```
+
+**Load data**
+
+```{r}
+glmm_data <- list.files(path = "data/combined/",
+                  pattern="*.csv",
+                  full.names = T) %>%
+  map_df(~read_csv(., col_types = cols(.default = "c"))) 
+```
+
+**Select the variables we're broadly interested in**
+
+```{r}
+glmm_data <- glmm_data %>%
+  
+  dplyr::select(c(
+    
+          # general descriptors of each sample 
+          SITE_ID, SAMPLE_DATE_YEAR, SAMPLE_DATE_MONTH,
+          
+          # habitat quality variables
+          DISCHARGE, WIDTH, SLOPE, 
+          SILT_CLAY, BOULDERS_COBBLES, PEBBLES_GRAVEL, SAND,
+          
+          # water quality variables (that can be predicted by INCA)
+          `Temperature of Water_cel`,
+          `Oxygen, Dissolved as O2_mg/l`,
+          `Ammonia un-ionised as N_mg/l`, 
+          `Nitrate as N_mg/l`,
+          `Orthophosphate, reactive as P_mg/l`, 
+           
+          # response variables 
+          WHPT_ASPT, WHPT_TOTAL, 
+          macro_richness, 
+          mollusc, 
+          total_abundance,
+          ept_richness,
+          ept_abundance,
+          `insect - true fly (Diptera)`,
+          `insect - stonefly (Plecoptera)`,
+          `insect - mayfly (Ephemeroptera)`,
+          `insect - dragonfly (Odonata)`,
+          `insect - caddis fly (Trichoptera)`,
+          `insect - beetle (Coleoptera)`,
+          `flatworm (Turbellaria)`,
+          crustacean,
+          annelid)) %>%
+  
+  drop_na()  # llmer requires full cases 
+
+
+# convert all to numeric 
+glmm_data <- data.frame(lapply(glmm_data, function(x) as.numeric(as.character(x))))
+
+# set site as a factor 
+glmm_data$SITE_ID <- as.factor(glmm_data$SITE_ID) 
+
+```
+
+**Count observations per site**
+
+```{r}
+#count <- glmm_data %>%
+#  count(SITE_ID)
+#glmm_data <- left_join(glmm_data, count, by = "SITE_ID")
+#table(count$n)
+```
+
+**Create a variable for flow (based on EA discharge classes)**
+
+```{r}
+# discharge categories are from 1 to 10 and are based on a log scale of.... 
+# naturalized mean annual discharge (cumecs). For each discharge category ....
+# set the flow to the middle of the range of cumec data.
+
+glmm_data$flow <- if_else(glmm_data$DISCHARGE == 1, 0.155,
+                  if_else(glmm_data$DISCHARGE == 2, 0.465,
+                  if_else(glmm_data$DISCHARGE == 3, 0.935,
+                  if_else(glmm_data$DISCHARGE == 4, 1.875,
+                  if_else(glmm_data$DISCHARGE == 5, 3.75,
+                  if_else(glmm_data$DISCHARGE == 6, 7.5,
+                  if_else(glmm_data$DISCHARGE == 7, 15.0,
+                  if_else(glmm_data$DISCHARGE == 8, 30.0,
+                  if_else(glmm_data$DISCHARGE == 9, 60.0,
+                  if_else(glmm_data$DISCHARGE == 10, 120.0, 0
+                  ))))))))))
+
+
+```
+
+
+
+## Data exploration
+
+**Co-linearity of explanatory variables**
+
+```{r, message=F, warning=F}
+
+hq = c(16, 4, 5, 6, 7, 8, 9, 10)
+
+ggpairs(glmm_data[, hq], 
+        lower = list(continuous = wrap("points", col = rgb(0.2, 0.5, 1, 0.4), 
+                                       alpha = 0.25, size=0.3))) + 
+  theme_minimal(base_size = 6)
+```
+
+
+```{r, message=F, warning=F}
+
+wq = c(16, 11, 12, 13, 14, 15)
+
+ggpairs(glmm_data[, wq], 
+        lower = list(continuous = wrap("points", col = rgb(0.2, 0.5, 1, 0.4), 
+                                       alpha = 0.25, size=0.3))) + 
+  theme_minimal(base_size = 6)
+```
+
+## Regression models
+
+### LMMs
+
+**WHPT_ASPT**
+
+```{r}
+# log transform flow, ammonia, nitrate and orthophosphate as these are skewed 
+
+### Variables that are not considered in the regressions:
+# WIDTH - co-linear with flow
+# SLOPE - no hypothesis 
+# BOULDERS_COBBLES - not independent of SILT_CLAY
+# PEBBLES_GRAVEL - not independent of SILT_CLAY
+# SAND - not independent of SILT_CLAY
+# poly(Temperature.of.Water_cel, 2) - no curvature and doesn't improve model
+# SAMPLE_DATE_MONTH - not significant and no clear hypothesis
+# SAMPLE_DATE_YEAR - not significant and no clear hypothesis
+# Interactions were not considered a priori and didn't significantly increase fit
+
+aspt_model <- lmer(WHPT_ASPT ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+              data = glmm_data)
+
+options(scipen=999)
+summary(aspt_model)
+
+r.squaredGLMM(aspt_model)
+```
+
+**WHPT_TOTAL**
+
+```{r}
+total_model <- lmer(WHPT_TOTAL ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+              data = glmm_data)
+
+summary(total_model)
+
+r.squaredGLMM(total_model)
+```
+
+
+**Macroinvertebrate Richness**
+
+```{r}
+rich_model <- lmer(macro_richness ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+              data = glmm_data)
+
+summary(rich_model)
+
+r.squaredGLMM(rich_model)
+```
+
+
+
+
+### Diagnostics 
+
+**1. Assess co-linearity of predictors** 
+
+```{r}
+predictors <- dplyr::select(glmm_data, c(flow, SILT_CLAY, 
+                                  Temperature.of.Water_cel, 
+                                  Oxygen..Dissolved.as.O2_mg.l,
+                                  Orthophosphate..reactive.as.P_mg.l,
+                                  Ammonia.un.ionised.as.N_mg.l,
+                                  Nitrate.as.N_mg.l))
+
+predictors$flow <- log(predictors$flow)
+predictors$Ammonia.un.ionised.as.N_mg.l <- log(predictors$Ammonia.un.ionised.as.N_mg.l)
+predictors$Orthophosphate..reactive.as.P_mg.l <- log(predictors$Orthophosphate..reactive.as.P_mg.l)
+predictors$Nitrate.as.N_mg.l <- log(predictors$Nitrate.as.N_mg.l)
+
+ggpairs(predictors, 
+        lower = list(continuous = wrap("points", col = rgb(0.2, 0.5, 1, 0.4), 
+                                       alpha = 0.25, size=0.3))) + 
+  theme_minimal(base_size = 6);
+```
+
+
+**2. Residuals are normally distributed**
+
+```{r}
+par(mfrow=c(2,2))
+hist(resid(aspt_model), breaks = 30)
+hist(resid(total_model), breaks = 30)
+hist(resid(rich_model), breaks = 30)
+
+```
+
+
+**3. Homogeneity of variance** 
+
+```{r}
+plot(aspt_model)
+plot(total_model)
+plot(rich_model)
+```
+
+### GLMMs
+
+Taxa are zero inflated and/or heavily skewed - use Poisson distribution with glmer function.
+
+
+**Plecoptera Abundance**
+
+```{r}
+plecoptera_model <- glmer(glmm_data$insect...stonefly..Plecoptera.~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(plecoptera_model)
+
+r.squaredGLMM(plecoptera_model)
+
+
+```
+
+
+**Annelida Abundance**
+
+```{r}
+
+annelid_model <- glmer(glmm_data$annelid ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(annelid_model)
+
+r.squaredGLMM(annelid_model)
+
+
+```
+
+**Trichoptera Abundance**
+
+```{r}
+
+trichoptera_model <- glmer(glmm_data$insect...caddis.fly..Trichoptera. ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(trichoptera_model)
+
+r.squaredGLMM(trichoptera_model)
+
+
+```
+
+
+
+**Ephemeroptera Abundance**
+
+```{r}
+
+mayfly_model <- glmer(glmm_data$insect...mayfly..Ephemeroptera. ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(mayfly_model)
+
+r.squaredGLMM(mayfly_model)
+
+
+```
+
+**Odonata Abundance**
+
+```{r}
+
+dragon_model <- glmer(glmm_data$insect...dragonfly..Odonata. ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(dragon_model)
+
+r.squaredGLMM(dragon_model)
+
+
+```
+
+**Coleoptera Abundance**
+
+```{r}
+
+beet_model <- glmer(glmm_data$insect...beetle..Coleoptera. ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(beet_model)
+
+r.squaredGLMM(beet_model)
+
+
+```
+
+**Flatworm Abundance**
+
+```{r}
+
+flat_model <- glmer(glmm_data$flatworm..Turbellaria. ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+
+summary(flat_model)
+
+r.squaredGLMM(flat_model)
+
+
+```
+
+
+### Diagnostics
+
+```{r}
+
+# only consider groups whose regression models are above 0.1. This includes:
+# flat_model, beet_model, dragon_model, mayfly_model, trichoptera_model, plecoptera_model, annelid_model
+
+# excluded groups due to poorly fitting regressions = Diptera, Mollusca, Crustacean
+
+
+### Obtain informative versions of residuals###
+simulationOutput_stone <- simulateResiduals(fittedModel = plecoptera_model, 
+                                            plot = F)
+simulationOutput_worm <- simulateResiduals(fittedModel = annelid_model, 
+                                            plot = F)
+simulationOutput_caddis <- simulateResiduals(fittedModel = trichoptera_model, 
+                                            plot = F)
+simulationOutput_flat <- simulateResiduals(fittedModel = flat_model, 
+                                            plot = F)
+simulationOutput_beet <- simulateResiduals(fittedModel = beet_model, 
+                                            plot = F)
+simulationOutput_dragon <- simulateResiduals(fittedModel = dragon_model, 
+                                            plot = F)
+simulationOutput_may <- simulateResiduals(fittedModel = mayfly_model, 
+                                            plot = F)
+
+
+# check normality of residules (specific tests too sensitive to large n)
+par(mfrow=c(2,4))
+plotQQunif(simulationOutput_stone, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Plecoptera",
+           pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_worm, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Annelida",
+           pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_caddis, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Trichoptera",
+           pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_flat, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Flatworms",
+           pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_beet, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Coleoptera",
+           pch = 19, cex = 0.2)
+plotQQunif(simulationOutput_dragon, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Odonata",
+           pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_may, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Ephemeroptera",
+           pch = 19, cex = 0.2) 
+
+
+# check residules v predicted (specific tests too sensitive to large n)
+par(mfrow=c(2,4))
+plotResiduals(simulationOutput_stone, quantreg = F, pch = 19, cex = 0.2)#, main = "Plecoptera")
+plotResiduals(simulationOutput_worm, quantreg = F, pch = 19, cex = 0.2)#, main = "Annelida")
+plotResiduals(simulationOutput_flat, quantreg = F, pch = 19, cex = 0.2)#, main = "Tricoptera")
+plotResiduals(simulationOutput_caddis, quantreg = F, pch = 19, cex = 0.2)#, main = "Flatworms")
+plotResiduals(simulationOutput_beet, quantreg = F, pch = 19, cex = 0.2)#, main = "Coleoptera")
+plotResiduals(simulationOutput_dragon, quantreg = F, pch = 19, cex = 0.2)#, main = "Odonata")
+plotResiduals(simulationOutput_may, quantreg = F, pch = 19, cex = 0.2)#, main = "Ephemeroptera")
+```
+Some deviations from statistical tests, but not enough to rule out the models. 
+
+
+
+## Predictions 
+
+
+As we have linear models with no interactions or polynomials we can just take arbitrary values for a baseline (e.g., mean values the variables in the "modern" dataset). We can calculate macroinvertebrate scores for this baseline. Then we change the baseline values for the explanatory variables by how much INCA predicts for each scenario. Then we calculate the macroinvertebrate scores again and measure the difference. We can plot the data as points (median INCA predictions) with error bars (INCA upper and lower percentiles). We are not making ***specific*** predictions about what the macroinvertebrate score will be at a specific site. Instead, we are just asking what the change will be due to changes in the fixed effects. So calculating the prediction intervals (using standard error of regression models) doesn't make much sense. If we wanted to predict a specific score, we would need to account for the standard error of the regression model coefficients and we would need to report the prediction interval. We would need to do this for the range of INCA results as well - so there would be considerable error propagation. Instead, we are just interested in change so we just need to carry through the INCA uncertainty to the forecast uncertainty. 
+
+
+
+
+**Establish baseline**
+
+```{r}
+flow <- mean(glmm_data$flow) + 50 # preventing negative values
+Temperature.of.Water_cel <- mean(glmm_data$Temperature.of.Water_cel) 
+Oxygen..Dissolved.as.O2_mg.l <- mean(glmm_data$Oxygen..Dissolved.as.O2_mg.l) 
+Orthophosphate..reactive.as.P_mg.l <- mean(glmm_data$Orthophosphate..reactive.as.P_mg.l)
+SILT_CLAY <- mean(glmm_data$SILT_CLAY)
+Ammonia.un.ionised.as.N_mg.l <- mean(glmm_data$Ammonia.un.ionised.as.N_mg.l) +5 # preventing negative values
+Nitrate.as.N_mg.l <- mean(glmm_data$Nitrate.as.N_mg.l)
+
+SITE_ID <- 33208 # random site ID
+
+baseline <- data.frame(flow, Temperature.of.Water_cel,
+                            Oxygen..Dissolved.as.O2_mg.l,
+                            Orthophosphate..reactive.as.P_mg.l,
+                            SILT_CLAY, Ammonia.un.ionised.as.N_mg.l,
+                            Nitrate.as.N_mg.l, SITE_ID)
+
+# Calculate macroinvertebrate scores for baselines 
+baseline_aspt <- predict(aspt_model, baseline)
+baseline_total <- predict(total_model, baseline)
+baseline_rich <- predict(rich_model, baseline)
+baseline_stone <- predict(plecoptera_model, baseline)
+baseline_worms <- predict(annelid_model, baseline)
+baseline_flat <- predict(flat_model, baseline)
+baseline_beet <- predict(beet_model, baseline)
+baseline_dragon <- predict(dragon_model, baseline)
+baseline_may <- predict(mayfly_model, baseline)
+baseline_trich <- predict(trichoptera_model, baseline)
+
+
+```
+
+
+
+**Load in scenarios** 
+
+```{r}
+scenarios <- read.csv("data/scenarios/scenarios.csv",
+                      header = T)
+
+# give a unique name to flow
+scenarios$Variable <- gsub("flow", "Fl", scenarios$Variable)
+
+```
+
+
+**define a function for making the predictions**
+
+```{r}
+
+## Create a function that takes a climate, a land use and a site and returns
+## .. the median, lower and upper change for all the macroinvertebrate responses 
+
+macro_predictions <- function(location, climate, land) {
+  
+  data_test <- scenarios %>%
+  filter(Site == location) %>%
+  filter(RCP == climate) %>%
+  filter(LandUse == land) 
+
+  #### Median ####
+  median <- data_test %>%
+    filter(Estimate == "median") %>%
+    select(-c(X, Site, RCP, LandUse, Estimate)) %>%
+    pivot_wider(names_from = "Variable", values_from = "Differences") %>%
+    # add in fixed baselines 
+    mutate(SITE_ID = baseline$SITE_ID) %>%
+    mutate(SILT_CLAY = baseline$SILT_CLAY) %>%
+    # add in predicted changes due to INCA 
+    mutate(flow = baseline$flow + Fl) %>%
+    mutate(Temperature.of.Water_cel = baseline$Temperature.of.Water_cel + temp) %>%
+    mutate(Oxygen..Dissolved.as.O2_mg.l = baseline$Oxygen..Dissolved.as.O2_mg.l + DO) %>%
+    mutate(Orthophosphate..reactive.as.P_mg.l = baseline$Orthophosphate..reactive.as.P_mg.l + P) %>%
+    mutate(Nitrate.as.N_mg.l = baseline$Nitrate.as.N_mg.l + Ni) %>%
+    mutate(Ammonia.un.ionised.as.N_mg.l = baseline$Ammonia.un.ionised.as.N_mg.l + Am) 
+  
+  median_aspt <- predict(aspt_model, median) - baseline_aspt
+  median_total <- predict(total_model, median) - baseline_total
+  median_rich <- predict(rich_model, median) - baseline_rich
+  median_stone <- predict(plecoptera_model, median) - baseline_stone
+  median_worm <- predict(annelid_model, median) - baseline_worms
+  median_flat <- predict(flat_model, median) - baseline_flat
+  median_beet <- predict(beet_model, median) - baseline_beet
+  median_dragon <- predict(dragon_model, median) - baseline_dragon
+  median_may <- predict(mayfly_model, median) - baseline_may
+  median_trich <- predict(trichoptera_model, median) - baseline_trich
+
+  
+  
+  #### Lower ####
+  lower <- data_test %>%
+    filter(Estimate == "lower") %>%
+    select(-c(X, Site, RCP, LandUse, Estimate)) %>%
+    pivot_wider(names_from = "Variable", values_from = "Differences") %>%
+    # add in fixed baselines 
+    mutate(SITE_ID = baseline$SITE_ID) %>%
+    mutate(SILT_CLAY = baseline$SILT_CLAY) %>%
+    # add in predicted changes due to INCA 
+    mutate(flow = baseline$flow + Fl) %>%
+    mutate(Temperature.of.Water_cel = baseline$Temperature.of.Water_cel + temp) %>%
+    mutate(Oxygen..Dissolved.as.O2_mg.l = baseline$Oxygen..Dissolved.as.O2_mg.l + DO) %>%
+    mutate(Orthophosphate..reactive.as.P_mg.l = baseline$Orthophosphate..reactive.as.P_mg.l + P) %>%
+    mutate(Nitrate.as.N_mg.l = baseline$Nitrate.as.N_mg.l + Ni) %>%
+    mutate(Ammonia.un.ionised.as.N_mg.l = baseline$Ammonia.un.ionised.as.N_mg.l + Am) 
+  
+  lower_aspt <- predict(aspt_model, lower) - baseline_aspt
+  lower_total <- predict(total_model, lower) - baseline_total
+  lower_rich <- predict(rich_model, lower) - baseline_rich
+  lower_stone <- predict(plecoptera_model, lower) - baseline_stone
+  lower_worm <- predict(annelid_model, lower) - baseline_worms
+  lower_flat <- predict(flat_model, lower) - baseline_flat
+  lower_beet <- predict(beet_model, lower) - baseline_beet
+  lower_dragon <- predict(dragon_model, lower) - baseline_dragon
+  lower_may <- predict(mayfly_model, lower) - baseline_may
+  lower_trich <- predict(trichoptera_model, lower) - baseline_trich
+  
+  #### Upper ####
+  upper <- data_test %>%
+    filter(Estimate == "upper") %>%
+    select(-c(X, Site, RCP, LandUse, Estimate)) %>%
+    pivot_wider(names_from = "Variable", values_from = "Differences") %>%
+    # add in fixed baselines 
+    mutate(SITE_ID = baseline$SITE_ID) %>%
+    mutate(SILT_CLAY = baseline$SILT_CLAY) %>%
+    # add in predicted changes due to INCA 
+    mutate(flow = baseline$flow + Fl) %>%
+    mutate(Temperature.of.Water_cel = baseline$Temperature.of.Water_cel + temp) %>%
+    mutate(Oxygen..Dissolved.as.O2_mg.l = baseline$Oxygen..Dissolved.as.O2_mg.l + DO) %>%
+    mutate(Orthophosphate..reactive.as.P_mg.l = baseline$Orthophosphate..reactive.as.P_mg.l + P) %>%
+    mutate(Nitrate.as.N_mg.l = baseline$Nitrate.as.N_mg.l + Ni) %>%
+    mutate(Ammonia.un.ionised.as.N_mg.l = baseline$Ammonia.un.ionised.as.N_mg.l + Am) 
+  
+  upper_aspt <- predict(aspt_model, upper) - baseline_aspt
+  upper_total <- predict(total_model, upper) - baseline_total
+  upper_rich <- predict(rich_model, upper) - baseline_rich
+  upper_stone <- predict(plecoptera_model, upper) - baseline_stone
+  upper_worm <- predict(annelid_model, upper) - baseline_worms
+  upper_flat <- predict(flat_model, upper) - baseline_flat
+  upper_beet <- predict(beet_model, upper) - baseline_beet
+  upper_dragon <- predict(dragon_model, upper) - baseline_dragon
+  upper_may <- predict(mayfly_model, upper) - baseline_may
+  upper_trich <- predict(trichoptera_model, upper) - baseline_trich
+  
+  combined <- data.frame(median_aspt, median_total, median_rich,
+                         lower_aspt, lower_total, lower_rich, 
+                         upper_aspt, upper_total, upper_rich,
+                         upper_stone, upper_worm, lower_stone, lower_worm, median_stone, median_worm,
+                         median_flat, median_beet, median_dragon, median_may, median_trich,
+                         upper_flat, upper_beet, upper_dragon, upper_may, upper_trich,
+                         lower_flat, lower_beet, lower_dragon, lower_may, lower_trich)
+  
+  combined$scenario <- paste(location, climate, land,sep = ".")
+  
+  return(combined)
+  
+}
+
+
+```
+
+
+**Run scenarios** 
+
+```{r}
+
+C_26_no <- macro_predictions("Crick", "rcp26", "no_land")
+O_26_no <- macro_predictions("Ox", "rcp26", "no_land")
+L_26_no <- macro_predictions("Lon", "rcp26", "no_land")
+C_45_no <- macro_predictions("Crick", "rcp45", "no_land")
+O_45_no <- macro_predictions("Ox", "rcp45", "no_land")
+L_45_no <- macro_predictions("Lon", "rcp45", "no_land")
+E_26_no <- macro_predictions("Egham", "rcp26", "no_land")
+E_45_no <- macro_predictions("Egham", "rcp45", "no_land")
+Ca_26_no <- macro_predictions("Caver", "rcp26", "no_land")
+Ca_45_no <- macro_predictions("Caver", "rcp45", "no_land")
+
+C_26_ag <- macro_predictions("Crick", "rcp26", "agri")
+O_26_ag <- macro_predictions("Ox", "rcp26", "agri")
+L_26_ag <- macro_predictions("Lon", "rcp26", "agri")
+C_45_ag <- macro_predictions("Crick", "rcp45", "agri")
+O_45_ag <- macro_predictions("Ox", "rcp45", "agri")
+L_45_ag <- macro_predictions("Lon", "rcp45", "agri")
+E_26_ag <- macro_predictions("Egham", "rcp26", "agri")
+E_45_ag <- macro_predictions("Egham", "rcp45", "agri")
+Ca_26_ag <- macro_predictions("Caver", "rcp26", "agri")
+Ca_45_ag <- macro_predictions("Caver", "rcp45", "agri")
+
+C_26_agP <- macro_predictions("Crick", "rcp26", "agri_P")
+O_26_agP <- macro_predictions("Ox", "rcp26", "agri_P")
+L_26_agP <- macro_predictions("Lon", "rcp26", "agri_P")
+C_45_agP <- macro_predictions("Crick", "rcp45", "agri_P")
+O_45_agP <- macro_predictions("Ox", "rcp45", "agri_P")
+L_45_agP <- macro_predictions("Lon", "rcp45", "agri_P")
+E_26_agP <- macro_predictions("Egham", "rcp26", "agri_P")
+E_45_agP <- macro_predictions("Egham", "rcp45", "agri_P")
+Ca_26_agP <- macro_predictions("Caver", "rcp26", "agri_P")
+Ca_45_agP <- macro_predictions("Caver", "rcp45", "agri_P")
+
+macroinvertebrate_changes <- rbind(C_26_no, O_26_no, L_26_no, E_26_no, Ca_26_no,
+                                   C_45_no, O_45_no, L_45_no, E_45_no, Ca_45_no,
+                                   
+                                   C_26_ag, O_26_ag, L_26_ag, E_26_ag, Ca_26_ag,
+                                   C_45_ag, O_45_ag, L_45_ag, E_45_ag, Ca_45_ag,
+                                   
+                                   C_26_agP, O_26_agP, L_26_agP, E_26_agP, Ca_26_agP,
+                                   C_45_agP, O_45_agP, L_45_agP, E_45_agP, Ca_45_agP)
+
+rm(C_26_no, O_26_no, L_26_no, C_45_no, O_45_no, L_45_no, 
+   C_26_ag, O_26_ag, L_26_ag, C_45_ag, O_45_ag, L_45_ag,
+   C_26_agP, O_26_agP, L_26_agP, C_45_agP, O_45_agP, L_45_agP,
+   E_26_no, Ca_26_no, E_45_no, Ca_45_no, E_26_ag, Ca_26_ag,
+   E_45_ag, Ca_45_ag, E_26_agP, Ca_26_agP, E_45_agP, Ca_45_agP)
+
+```
+
+**Save results** 
+
+```{r}
+write.csv(macroinvertebrate_changes, "data/macro_results.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

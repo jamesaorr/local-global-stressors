@@ -1,0 +1,867 @@
+---
+title: "Plotting Results"
+author: "James Orr"
+output:
+   html_notebook:
+     code_folding: hide
+     theme: flatly
+     toc: true
+     toc_depth: 4
+     number_sections: no
+---
+
+This is a short notebook where we create the figures for the paper. 
+
+**Set up Environment**
+
+```{r, echo=TRUE, results='hide'}
+#### Clear  environment 
+rm(list = ls())         
+
+#### Required packages
+library(tidyverse)        # for general use
+library(sf)               # classes and functions for vector data
+library(raster)           # classes and functions for raster data
+library(nngeo)            # for the sf_remove_holes function
+library(ggspatial)        # for scale bar and north arrow 
+library(readxl)           # reading excel files
+```
+
+
+## Map of catchment 
+
+**Load and organise data**
+
+```{r}
+######### Thames Catchment Boundary ############
+catchment_shape <- st_read("data/geo/catch/WFD_River_Basin_Districts_Cycle_2.shp") %>%
+  # subset the Thames catchment 
+  filter(rbd_name == "Thames")
+
+
+### Sub-catchments ###
+sub_catchments_shape <- st_read("data/geo/catch/WFD_Surface_Water_Management_Catchments_Cycle_3.shp") %>%
+  filter(!MNCAT_NAME %in% c("Medway", "Thames TraC", "Kent North", "London",
+                            "Darent and Cray", "Lee Upper", "Roding Beam and Ingrebourne",
+                            "Essex South"))
+  
+catchment_main <- st_remove_holes(st_union(sub_catchments_shape)) 
+
+######### River shapefile ############
+rivers_shape <- st_read("data/geo/rivers/data/WatercourseLink.shp") %>%
+  # reduce the "resolution" of the shapefile 
+  #st_simplify(dTolerance = 100) %>%
+  filter(st_within(x = ., y = catchment_main, sparse = FALSE))
+
+
+#### Thames main river #######
+thames <- st_read("data/geo/RBD_Thames_shapefile/WFD_River_Water_Bodies_Cycle_3.shp") %>%
+  filter(WB_NAME %in% c("Thames (Churn to Coln)",
+                        "Thames (Cookham to Egham)",
+                        "Thames (Egham to Teddington)",
+                        "Thames (Evenlode to Thame)",
+                        "Thames (Kemble to Waterhay Bridge)",
+                        "Thames (Leach to Evenlode)",
+                        "Thames (Reading to Cookham)",
+                        "Thames (Waterhaybridge to Cricklade) and Chelworth Brook",
+                        "Thames Wallingford to Caversham"))
+
+
+######### UK Boundaries ############ (http://www.diva-gis.org/gdata)
+uk_admin <- st_read("data/geo/GBR_adm/GBR_adm0.shp") %>%
+  st_simplify(dTolerance = 100)
+
+
+######## Elevation data for Thames catchment #########
+elevation <- raster("data/geo/GBR_alt/GBR_alt.grd") 
+
+new_crs <- new_crs <- CRS("+init=epsg:27700")       # WKT formate
+elevation <- projectRaster(elevation, crs=new_crs)
+
+elevation <- mask(elevation, sub_catchments_shape)
+
+elevation_df <- as.data.frame(rasterToPoints(elevation))
+
+
+#### manually locating three sites #### 
+easting = c(410306, 452409, 515411, 471394, 503607)
+northing = c(193909, 202855, 168473, 174426, 170277)
+place = c("Cricklade", "Oxford", "London", "Caversham", "Egham")
+river_sites <- data.frame(easting,  northing, place)
+
+river_sites <- st_as_sf(river_sites, coords = c("easting", "northing")) %>%
+  st_set_crs(., 27700)
+
+
+### London ###
+london <- st_read("data/geo/london/London_Borough_Excluding_MHW.shp") %>%
+  st_set_crs(., 27700)
+london<-st_union(london)
+
+```
+
+
+
+```{r}
+### Invert data ### 
+macro_data <- list.files(path = "data/combined/",
+                  pattern="*.csv",
+                  full.names = T) %>%
+  map_df(~read_csv(., col_types = cols(.default = "c")))
+
+### Need to filter in the same way I do for my regressions 
+macro_data <- macro_data %>%
+  
+  dplyr::select(c(
+    
+          # general descriptors of each sample 
+          SITE_ID, SAMPLE_DATE_YEAR, SAMPLE_DATE_MONTH,
+          
+          # habitat quality variables
+          DISCHARGE, WIDTH, SLOPE, 
+          SILT_CLAY, BOULDERS_COBBLES, PEBBLES_GRAVEL, SAND,
+          
+          # water quality variables (that can be predicted by INCA)
+          `Temperature of Water_cel`,
+          `Oxygen, Dissolved as O2_mg/l`,
+          `Ammonia un-ionised as N_mg/l`, 
+          `Nitrate as N_mg/l`,
+          `Orthophosphate, reactive as P_mg/l`, 
+           
+          # response variables 
+          WHPT_ASPT, WHPT_TOTAL, 
+          macro_richness, 
+          mollusc, 
+          total_abundance,
+          ept_richness,
+          ept_abundance,
+          `insect - true fly (Diptera)`,
+          `insect - stonefly (Plecoptera)`,
+          `insect - mayfly (Ephemeroptera)`,
+          `insect - dragonfly (Odonata)`,
+          `insect - caddis fly (Trichoptera)`,
+          `insect - beetle (Coleoptera)`,
+          `flatworm (Turbellaria)`,
+          crustacean,
+          annelid)) %>%
+  
+  drop_na()  # llmer requires full cases 
+
+# Need to go back and grab the full eastings and full northings 
+data_site <- read.csv("data/eco/inverts/INV_OPEN_DATA_SITE_2022-02-01.csv", 
+                     header = T)
+
+data_site <- data_site %>%
+  filter(SITE_ID %in% macro_data$SITE_ID) %>%
+  dplyr::select(c(SITE_ID, FULL_EASTING, FULL_NORTHING)) 
+
+data_site$SITE_ID <- as.character(data_site$SITE_ID)
+
+macro_data <- left_join(macro_data, data_site, by = "SITE_ID")
+
+macro_data <- st_as_sf(macro_data, coords = c("FULL_EASTING", 
+                                              "FULL_NORTHING")) %>%
+  st_set_crs(., 27700) %>%
+  filter(st_within(x = ., y = catchment_main, sparse = FALSE))
+```
+
+```{r}
+ggplot(data = uk_admin) +
+  
+  geom_sf(fill = rgb(0.8, 0.8, 0.8), color = NA) +
+  
+  geom_sf(data = catchment_main, fill = "#a18660", color = NA) +
+  
+  theme_void()
+  
+```
+
+
+```{r, fig.width=8, fig.height=4.8}
+# colour ramp
+elevation_colours <- colorRampPalette(c("#99d38b",
+                                        "#fffabe",
+                                        "#ffdc8f",
+                                        "#a18660"))
+theme_set(theme_void())
+
+ggplot() +
+  
+  # elevation
+  geom_raster(data = elevation_df, aes(x = x, y = y, fill = GBR_alt)) +
+  scale_fill_gradientn(colors = elevation_colours(20), name = "Elevation (m)") +
+
+  # rivers
+  geom_sf(data = rivers_shape, color = rgb(0.1, 0.1, 1, 0.2)) +
+  
+  # Relevant-sub catchment 
+  geom_sf(data = catchment_main, color = rgb(0.5, 0.5, 0.5), linewidth = 0.5, fill =NA) +
+  
+  # Scale bar and north arrow 
+  annotation_scale(location = "bl", line_width = 2, text_cex = 1.2,
+                   pad_x = unit(1.6, "in"),
+                   pad_y = unit(1, "in")) +
+  annotation_north_arrow(location = "bl",
+                         pad_x = unit(1.6-0.85, "in"),
+                         pad_y = unit(1-0.2, "in")) +
+  
+  # Main Thames 
+  geom_sf(data = thames, color = rgb(0.2, 0.4, 1, 0.3), linewidth = 2.5) +
+  
+  # invert sites
+  geom_sf(data = macro_data, color = rgb(0.3, 0.3, 0.3), size = 1.5) +
+  
+  # river sites 
+  geom_sf(data = river_sites, color = "red") +
+
+  # Theme adjustments
+  theme(legend.direction="horizontal", 
+        legend.position = "top", 
+        legend.justification = "right",
+        legend.text=element_text(size = 12),
+        legend.title=element_text(size =  15))
+
+
+```
+
+
+## Water quality forecasts 
+
+```{r}
+#### No land-use change ####
+no_land_median <- read_excel("data/inca/summary_2080s.xlsx",
+                             sheet = "median_month")
+
+no_land_lower <- read_excel("data/inca/summary_2080s.xlsx",
+                             sheet = "lower_month")
+
+no_land_upper <- read_excel("data/inca/summary_2080s.xlsx",
+                             sheet = "upper_month")
+
+#### Agricultural intensification ####
+
+agri_median <- read_excel("data/inca/summary_2080s_agri.xlsx",
+                             sheet = "median_month")
+
+agri_lower <- read_excel("data/inca/summary_2080s_agri.xlsx",
+                             sheet = "lower_month")
+
+agri_upper <- read_excel("data/inca/summary_2080s_agri.xlsx",
+                             sheet = "upper_month")
+
+#### Agricultural intensification + P removal ####
+
+agri_P_median <- read_excel("data/inca/summary_2080s_agri_P.xlsx",
+                             sheet = "median_month")
+
+agri_P_lower <- read_excel("data/inca/summary_2080s_agri_P.xlsx",
+                             sheet = "lower_month")
+
+agri_P_upper <- read_excel("data/inca/summary_2080s_agri_P.xlsx",
+                             sheet = "upper_month")
+
+```
+
+```{r}
+data_cleaning <- function(dataset, name) {
+
+  dataset <- dataset %>%
+    dplyr::select(c(...1,
+                    baseline_TR01_flow,
+                    baseline_TR01_watertemperature,
+                    baseline_TR01_watercolSRP,
+                    baseline_TR01_dissolvedoxygen,
+                    baseline_TR01_ammonium,
+                    baseline_TR01_nitrate,
+                    rcp45_TR01_flow,
+                    rcp45_TR01_watertemperature,
+                    rcp45_TR01_watercolSRP,
+                    rcp45_TR01_dissolvedoxygen,
+                    rcp45_TR01_ammonium,
+                    rcp45_TR01_nitrate,
+                    
+                    baseline_TR22_flow,
+                    baseline_TR22_watertemperature,
+                    baseline_TR22_watercolSRP,
+                    baseline_TR22_dissolvedoxygen,
+                    baseline_TR22_ammonium,
+                    baseline_TR22_nitrate,
+                    rcp45_TR22_flow,
+                    rcp45_TR22_watertemperature,
+                    rcp45_TR22_watercolSRP,
+                    rcp45_TR22_dissolvedoxygen,
+                    rcp45_TR22_ammonium,
+                    rcp45_TR22_nitrate)) %>%
+    mutate(scenario = name)
+  
+  return(dataset)
+  
+}
+
+```
+
+```{r}
+no_land_median_short <- data_cleaning(no_land_median, "no_land_median")
+no_land_lower_short <- data_cleaning(no_land_lower, "no_land_lower")
+no_land_upper_short <- data_cleaning(no_land_upper, "no_land_upper")
+agri_P_median_short <- data_cleaning(agri_P_median, "agri_P_median")
+agri_P_lower_short <- data_cleaning(agri_P_lower, "agri_P_lower")
+agri_P_upper_short <- data_cleaning(agri_P_upper, "agri_P_upper")
+agri_median_short <- data_cleaning(agri_median, "agri_median")
+agri_lower_short <- data_cleaning(agri_lower, "agri_lower")
+agri_upper_short <- data_cleaning(agri_upper, "agri_upper")
+
+no_land <- rbind(no_land_median_short, no_land_lower_short, no_land_upper_short)
+agri <- rbind(agri_median_short, agri_lower_short, agri_upper_short)
+agri_P <- rbind(agri_P_median_short, agri_P_lower_short, agri_P_upper_short)
+
+
+no_land_wider <- pivot_wider(no_land, 
+                          names_from = scenario,
+                          values_from = c(baseline_TR01_flow,
+                    baseline_TR01_watertemperature,
+                    baseline_TR01_watercolSRP,
+                    baseline_TR01_dissolvedoxygen,
+                    baseline_TR01_ammonium,
+                    baseline_TR01_nitrate,
+                    rcp45_TR01_flow,
+                    rcp45_TR01_watertemperature,
+                    rcp45_TR01_watercolSRP,
+                    rcp45_TR01_dissolvedoxygen,
+                    rcp45_TR01_ammonium,
+                    rcp45_TR01_nitrate,
+                    
+                    baseline_TR22_flow,
+                    baseline_TR22_watertemperature,
+                    baseline_TR22_watercolSRP,
+                    baseline_TR22_dissolvedoxygen,
+                    baseline_TR22_ammonium,
+                    baseline_TR22_nitrate,
+                    rcp45_TR22_flow,
+                    rcp45_TR22_watertemperature,
+                    rcp45_TR22_watercolSRP,
+                    rcp45_TR22_dissolvedoxygen,
+                    rcp45_TR22_ammonium,
+                    rcp45_TR22_nitrate))
+
+agri_P_wider <- pivot_wider(agri_P, 
+                          names_from = scenario,
+                          values_from = c(baseline_TR01_flow,
+                    baseline_TR01_watertemperature,
+                    baseline_TR01_watercolSRP,
+                    baseline_TR01_dissolvedoxygen,
+                    baseline_TR01_ammonium,
+                    baseline_TR01_nitrate,
+                    rcp45_TR01_flow,
+                    rcp45_TR01_watertemperature,
+                    rcp45_TR01_watercolSRP,
+                    rcp45_TR01_dissolvedoxygen,
+                    rcp45_TR01_ammonium,
+                    rcp45_TR01_nitrate,
+                    
+                    baseline_TR22_flow,
+                    baseline_TR22_watertemperature,
+                    baseline_TR22_watercolSRP,
+                    baseline_TR22_dissolvedoxygen,
+                    baseline_TR22_ammonium,
+                    baseline_TR22_nitrate,
+                    rcp45_TR22_flow,
+                    rcp45_TR22_watertemperature,
+                    rcp45_TR22_watercolSRP,
+                    rcp45_TR22_dissolvedoxygen,
+                    rcp45_TR22_ammonium,
+                    rcp45_TR22_nitrate))
+
+agri_wider <- pivot_wider(agri, 
+                          names_from = scenario,
+                          values_from = c(baseline_TR01_flow,
+                    baseline_TR01_watertemperature,
+                    baseline_TR01_watercolSRP,
+                    baseline_TR01_dissolvedoxygen,
+                    baseline_TR01_ammonium,
+                    baseline_TR01_nitrate,
+                    rcp45_TR01_flow,
+                    rcp45_TR01_watertemperature,
+                    rcp45_TR01_watercolSRP,
+                    rcp45_TR01_dissolvedoxygen,
+                    rcp45_TR01_ammonium,
+                    rcp45_TR01_nitrate,
+                    
+                    baseline_TR22_flow,
+                    baseline_TR22_watertemperature,
+                    baseline_TR22_watercolSRP,
+                    baseline_TR22_dissolvedoxygen,
+                    baseline_TR22_ammonium,
+                    baseline_TR22_nitrate,
+                    rcp45_TR22_flow,
+                    rcp45_TR22_watertemperature,
+                    rcp45_TR22_watercolSRP,
+                    rcp45_TR22_dissolvedoxygen,
+                    rcp45_TR22_ammonium,
+                    rcp45_TR22_nitrate))
+
+```
+
+Crickdale 
+
+```{r, fig.height=2, fig.width=4.25, dpi = 300}
+
+par(mfrow = c(2, 3),
+    mar=c(3, 3, 3, 3)) 
+
+###### Flow, baseline, rcp45 all at cricklade 
+plot(no_land_wider$...1, no_land_wider$baseline_TR01_flow_no_land_median,
+     type = "l", xlab = "", ylab = "Flow",
+     ylim = c(1, 12.5), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR01_flow_no_land_lower,
+          rev(no_land_wider$rcp45_TR01_flow_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR01_flow_no_land_median, col = rgb(255/255, 177/255, 177/255), lwd = 2)
+
+
+
+###### Temperature, baseline, rcp45 all at cricklade 
+plot(no_land_wider$...1, no_land_wider$baseline_TR01_watertemperature_no_land_median,
+     type = "l", xlab = "", ylab = "Water Temperature",
+     ylim = c(3, 22), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR01_watertemperature_no_land_lower,
+          rev(no_land_wider$rcp45_TR01_watertemperature_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR01_watertemperature_no_land_median, col = rgb(255/255, 177/255, 177/255), lwd = 2)
+
+
+
+###### Oxygen, baseline, rcp45 all at cricklade 
+plot(no_land_wider$...1, no_land_wider$baseline_TR01_dissolvedoxygen_no_land_median,
+     type = "l", xlab = "", ylab = "Dissolved Oxygen",
+     ylim = c(8, 13), las =1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR01_dissolvedoxygen_no_land_lower,
+          rev(no_land_wider$rcp45_TR01_dissolvedoxygen_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR01_dissolvedoxygen_no_land_median, col = rgb(255/255, 177/255, 177/255), lwd = 2)
+
+
+###### P, base v agri_P, rcp45, cricklade
+plot(no_land_wider$...1, no_land_wider$baseline_TR01_watercolSRP_no_land_median,
+     type = "l", xlab = "", ylab = "Phosphorus",
+     ylim = c(0, 0.7), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR01_watercolSRP_no_land_lower,
+          rev(no_land_wider$rcp45_TR01_watercolSRP_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR01_watercolSRP_no_land_median, col = rgb(1, 0, 0, 0.3), lwd = 2)
+
+polygon(c(agri_P_wider$...1,
+          rev(agri_P_wider$...1)),
+        c(agri_P_wider$rcp45_TR01_watercolSRP_agri_P_lower,
+          rev(agri_P_wider$rcp45_TR01_watercolSRP_agri_P_upper)),col = rgb(0, 0, 1, 0.1), border = FALSE)
+lines(agri_P_wider$...1, agri_P_wider$rcp45_TR01_watercolSRP_agri_P_median, col = rgb(0, 0, 1, 0.3), lwd = 2, lty = 3)
+
+
+###### Nitrate, base v agri, rcp45, cricklade
+plot(no_land_wider$...1, no_land_wider$baseline_TR01_nitrate_no_land_median,
+     type = "l", xlab = "", ylab = "Nitrate",
+     ylim = c(6, 7.7), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR01_nitrate_no_land_lower,
+          rev(no_land_wider$rcp45_TR01_nitrate_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR01_nitrate_no_land_median, col = rgb(1, 0, 0, 0.3), lwd = 2)
+
+polygon(c(agri_wider$...1,
+          rev(agri_wider$...1)),
+        c(agri_wider$rcp45_TR01_nitrate_agri_lower,
+          rev(agri_wider$rcp45_TR01_nitrate_agri_upper)),col = rgb(1, 0, 0, 0.3), border = FALSE)
+lines(agri_wider$...1, agri_wider$rcp45_TR01_nitrate_agri_median, col = rgb(1, 0, 0, 0.5), lwd = 2, lty = 2)
+
+
+###### Ammonium, base v agri, rcp45, cricklade
+plot(no_land_wider$...1, no_land_wider$baseline_TR01_ammonium_no_land_median,
+     type = "l", xlab = "", ylab = "Ammonium",
+     ylim = c(0.035, 0.135), las = 1, lty = 2)
+
+polygon(c(agri_wider$...1,
+          rev(agri_wider$...1)),
+        c(agri_wider$rcp45_TR01_ammonium_agri_lower,
+          rev(agri_wider$rcp45_TR01_ammonium_agri_upper)),col = rgb(1, 0, 0, 0.3), border = FALSE)
+lines(agri_wider$...1, agri_wider$rcp45_TR01_ammonium_agri_median, col = rgb(1, 0, 0, 0.5), lwd = 2, lty = 2)
+
+```
+
+London 
+
+```{r, fig.height=2, fig.width=4.25, dpi = 300}
+
+par(mfrow = c(2, 3),
+    mar=c(3, 3, 3, 3)) 
+
+###### Flow, baseline, rcp45 all at London 
+plot(no_land_wider$...1, no_land_wider$baseline_TR22_flow_no_land_median,
+     type = "l", xlab = "", ylab = "Flow",
+     ylim = c(0, 230), 
+     las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR22_flow_no_land_lower,
+          rev(no_land_wider$rcp45_TR22_flow_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR22_flow_no_land_median, col = rgb(255/255, 177/255, 177/255), lwd = 2)
+
+
+
+###### Temperature, baseline, rcp45 all at London 
+plot(no_land_wider$...1, no_land_wider$baseline_TR22_watertemperature_no_land_median,
+     type = "l", xlab = "", ylab = "Water Temperature",
+     ylim = c(3, 22), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR22_watertemperature_no_land_lower,
+          rev(no_land_wider$rcp45_TR22_watertemperature_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR22_watertemperature_no_land_median, col = rgb(255/255, 177/255, 177/255), lwd = 2)
+
+
+
+###### Oxygen, baseline, rcp45 all at London 
+plot(no_land_wider$...1, no_land_wider$baseline_TR22_dissolvedoxygen_no_land_median,
+     type = "l", xlab = "", ylab = "Dissolved Oxygen",
+     ylim = c(7, 12.5), las =1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR22_dissolvedoxygen_no_land_lower,
+          rev(no_land_wider$rcp45_TR22_dissolvedoxygen_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR22_dissolvedoxygen_no_land_median, col = rgb(255/255, 177/255, 177/255), lwd = 2)
+
+
+###### P, base v agri_P, rcp45, London
+plot(no_land_wider$...1, no_land_wider$baseline_TR22_watercolSRP_no_land_median,
+     type = "l", xlab = "", ylab = "Phosphorus",
+     ylim = c(0, 0.75), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR22_watercolSRP_no_land_lower,
+          rev(no_land_wider$rcp45_TR22_watercolSRP_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR22_watercolSRP_no_land_median, col = rgb(1, 0, 0, 0.3), lwd = 2)
+
+polygon(c(agri_P_wider$...1,
+          rev(agri_P_wider$...1)),
+        c(agri_P_wider$rcp45_TR22_watercolSRP_agri_P_lower,
+          rev(agri_P_wider$rcp45_TR22_watercolSRP_agri_P_upper)),col = rgb(0, 0, 1, 0.1), border = FALSE)
+lines(agri_P_wider$...1, agri_P_wider$rcp45_TR22_watercolSRP_agri_P_median, col = rgb(0, 0, 1, 0.3), lwd = 2, lty = 3)
+
+
+###### Nitrate, base v agri, rcp45, London
+plot(no_land_wider$...1, no_land_wider$baseline_TR22_nitrate_no_land_median,
+     type = "l", xlab = "", ylab = "Nitrate",
+     ylim = c(5.8, 7.5), las = 1, lty = 2)
+polygon(c(no_land_wider$...1,
+          rev(no_land_wider$...1)),
+        c(no_land_wider$rcp45_TR22_nitrate_no_land_lower,
+          rev(no_land_wider$rcp45_TR22_nitrate_no_land_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+lines(no_land_wider$...1, no_land_wider$rcp45_TR22_nitrate_no_land_median, col = rgb(1, 0, 0, 0.3), lwd = 2)
+
+polygon(c(agri_wider$...1,
+          rev(agri_wider$...1)),
+        c(agri_wider$rcp45_TR22_nitrate_agri_lower,
+          rev(agri_wider$rcp45_TR22_nitrate_agri_upper)),col = rgb(1, 0, 0, 0.3), border = FALSE)
+lines(agri_wider$...1, agri_wider$rcp45_TR22_nitrate_agri_median, col = rgb(1, 0, 0, 0.5), lwd = 2, lty = 2)
+
+
+###### Ammonium, base v agri, rcp45, London
+plot(no_land_wider$...1, no_land_wider$baseline_TR22_ammonium_no_land_median,
+     type = "l", xlab = "", ylab = "Ammonium",
+     ylim = c(0.07, 0.15), las = 1, lty = 2)
+
+polygon(c(agri_wider$...1,
+          rev(agri_wider$...1)),
+        c(agri_wider$rcp45_TR22_ammonium_agri_lower,
+          rev(agri_wider$rcp45_TR22_ammonium_agri_upper)),col = rgb(1, 0, 0, 0.3), border = FALSE)
+lines(agri_wider$...1, agri_wider$rcp45_TR22_ammonium_agri_median, col = rgb(1, 0, 0, 0.5), lwd = 2, lty = 2)
+
+```
+
+
+
+```{r}
+climate <- read.csv("data/inca/climate_change.csv", header = T)
+```
+
+```{r, fig.height=3, fig.width=4, dpi = 300}
+
+par(mfrow = c(2, 2),
+    mar=c(2, 1.5, 2, 1.5),   # plot margins
+    oma=c(3, 3, 3, 3))   # outer margins 
+  
+plot(climate$Month, climate$rcp26_percipitation_median,
+     type = "l", xlab = "", ylab = "Percipitation (% change)",
+     ylim = c(-50, 50), las = 1, lty = 1,
+     col = rgb(1, 0, 0, 0.3),
+     lwd = 3)
+polygon(c(climate$Month,
+          rev(climate$Month)),
+        c(climate$rcp26_percipitation_lower,
+          rev(climate$rcp26_percipitation_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+abline(h = 0, lwd = 2, lty = 2, col = "grey60")
+
+plot(climate$Month, climate$rcp45_percipitation_median,
+     type = "l", xlab = "", ylab = "",
+     ylim = c(-50, 50), las = 1, lty = 1,
+     col = rgb(1, 0, 0, 0.5),
+     lwd = 3)
+polygon(c(climate$Month,
+          rev(climate$Month)),
+        c(climate$rcp45_percipitation_lower,
+          rev(climate$rcp45_percipitation_upper)),col = rgb(1, 0, 0, 0.2), border = FALSE)
+abline(h = 0, lwd = 2, lty = 2, col = "grey60")
+
+
+
+
+
+plot(climate$Month, climate$rcp26_temperature_median,
+     type = "l", xlab = "", ylab = "Temperature (% change)",
+     ylim = c(-6.5, 6.5), las = 1, lty = 1,
+     col = rgb(1, 0, 0, 0.3),
+     lwd = 3)
+polygon(c(climate$Month,
+          rev(climate$Month)),
+        c(climate$rcp26_temperature_lower,
+          rev(climate$rcp26_temperature_upper)),col = rgb(1, 0, 0, 0.1), border = FALSE)
+abline(h = 0, lwd = 2, lty = 2, col = "grey60")
+
+plot(climate$Month, climate$rcp45_temperature_median,
+     type = "l", xlab = "", ylab = "",
+     ylim = c(-6.5, 6.5), las = 1, lty = 1,
+     col = rgb(1, 0, 0, 0.5),
+     lwd = 3)
+polygon(c(climate$Month,
+          rev(climate$Month)),
+        c(climate$rcp45_temperature_lower,
+          rev(climate$rcp45_temperature_upper)),col = rgb(1, 0, 0, 0.2), border = FALSE)
+abline(h = 0, lwd = 2, lty = 2, col = "grey60")
+
+
+```
+
+
+
+## Macrointertebrate forecasts
+
+**Load and organise data**
+
+```{r}
+macro_results <- read.csv("data/macro_results.csv", header = T)
+
+macro_results <- macro_results %>%
+  separate(scenario, into = c("Site", "Climate", "Land"), "\\.") %>%
+  mutate(site_rank = ifelse(Site == "Crick", 1, 
+                            ifelse(Site == "Ox", 2, 
+                                   ifelse(Site == "Caver", 3, 
+                                          ifelse(Site == "Egham", 4,5)))))
+
+macro_results$site_rank <- as.numeric(macro_results$site_rank)
+```
+
+
+
+**Functions for figures** 
+
+```{r}
+
+individual_plot <- function(ymax, site_rank, median, upper, lower, yax, col) {
+  
+  plot(site_rank, median,
+     xlim = c(0.25, 5.75), 
+     ylim = c(-ymax, ymax),
+     las = 1, xaxt='n', yaxt='n', xlab = "", ylab = "",
+     cex = 0,
+     frame.plot = TRUE)
+  arrows(site_rank, upper,
+         site_rank, lower,
+         code = 0, lwd = 2, col = rgb(0.5, 0.5, 0.5))
+  abline(h = 0, lty = 2)
+  points(site_rank, median,
+         cex = 2.5, pch = 21, col = rgb(0.15, 0.15, 0.15), bg = col)
+  text(site_rank, median, labels = site_rank)
+  
+  if (yax == "yes") {
+    axis(side = 2, las = 1)
+  }
+}
+
+
+plot_score <- function(site_rank, median, upper, lower){
+  
+  # set y axis limits 
+  ymax <- max(abs(upper), abs(lower))
+  
+  # set a color ramp 
+  rbPal <- colorRampPalette(c(rgb(1, 0.4, 0.4), 'white', rgb(0.4, 0.4, 1)))
+  breakpoints <- c(seq(from = -ymax, to = ymax, length.out = 100))
+  macro_results$Col <- rbPal(length(breakpoints))[as.numeric(cut(median,breaks = breakpoints))]
+
+  
+  par(mfrow = c(2, 3),
+      mar=c(0.2, 0.2, 0.2, 0.2),   # plot margins
+      oma=c(3, 3, 3, 3))   # outer margins 
+  
+  individual_plot(ymax, 
+                  site_rank[macro_results$Land == "no_land" & macro_results$Climate == "rcp26"],  
+                  median[macro_results$Land == "no_land" & macro_results$Climate == "rcp26"], 
+                  upper[macro_results$Land == "no_land" & macro_results$Climate == "rcp26"], 
+                  lower[macro_results$Land == "no_land" & macro_results$Climate == "rcp26"], 
+                  "yes", macro_results$Col[macro_results$Land == "no_land" & macro_results$Climate == "rcp26"])
+  
+    individual_plot(ymax, 
+                  site_rank[macro_results$Land == "agri" & macro_results$Climate == "rcp26"],  
+                  median[macro_results$Land == "agri" & macro_results$Climate == "rcp26"], 
+                  upper[macro_results$Land == "agri" & macro_results$Climate == "rcp26"], 
+                  lower[macro_results$Land == "agri" & macro_results$Climate == "rcp26"],
+                  "no", macro_results$Col[macro_results$Land == "agri" & macro_results$Climate == "rcp26"])
+    
+    individual_plot(ymax, 
+                  site_rank[macro_results$Land == "agri_P" & macro_results$Climate == "rcp26"],  
+                  median[macro_results$Land == "agri_P" & macro_results$Climate == "rcp26"], 
+                  upper[macro_results$Land == "agri_P" & macro_results$Climate == "rcp26"], 
+                  lower[macro_results$Land == "agri_P" & macro_results$Climate == "rcp26"],
+                  "no", macro_results$Col[macro_results$Land == "agri_P" & macro_results$Climate == "rcp26"])
+      
+    individual_plot(ymax, 
+                  site_rank[macro_results$Land == "no_land" & macro_results$Climate == "rcp45"],  
+                  median[macro_results$Land == "no_land" & macro_results$Climate == "rcp45"], 
+                  upper[macro_results$Land == "no_land" & macro_results$Climate == "rcp45"], 
+                  lower[macro_results$Land == "no_land" & macro_results$Climate == "rcp45"],
+                  "yes", macro_results$Col[macro_results$Land == "no_land" & macro_results$Climate == "rcp45"])
+  
+    individual_plot(ymax, 
+                  site_rank[macro_results$Land == "agri" & macro_results$Climate == "rcp45"],  
+                  median[macro_results$Land == "agri" & macro_results$Climate == "rcp45"], 
+                  upper[macro_results$Land == "agri" & macro_results$Climate == "rcp45"], 
+                  lower[macro_results$Land == "agri" & macro_results$Climate == "rcp45"],
+                  "no", macro_results$Col[macro_results$Land == "agri" & macro_results$Climate == "rcp45"])
+    
+    individual_plot(ymax, 
+                  site_rank[macro_results$Land == "agri_P" & macro_results$Climate == "rcp45"],  
+                  median[macro_results$Land == "agri_P" & macro_results$Climate == "rcp45"], 
+                  upper[macro_results$Land == "agri_P" & macro_results$Climate == "rcp45"], 
+                  lower[macro_results$Land == "agri_P" & macro_results$Climate == "rcp45"],
+                  "no", macro_results$Col[macro_results$Land == "agri_P" & macro_results$Climate == "rcp45"])
+      
+      
+}
+
+
+
+
+```
+
+
+WHPT_ASPT
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_aspt,
+           macro_results$upper_aspt, 
+           macro_results$lower_aspt)
+
+```
+WHPT_Total
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_total,
+           macro_results$upper_total, 
+           macro_results$lower_total)
+```
+
+
+Macro Richness
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_rich,
+           macro_results$upper_rich, 
+           macro_results$lower_rich)
+```
+
+
+Plecoptera 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_stone,
+           macro_results$upper_stone, 
+           macro_results$lower_stone)
+```
+
+
+Annelida 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_worm,
+           macro_results$upper_worm, 
+           macro_results$lower_worm)
+```
+
+
+
+Coleoptera 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_beet,
+           macro_results$upper_beet, 
+           macro_results$lower_beet)
+```
+
+
+
+Flatworm 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_flat,
+           macro_results$upper_flat, 
+           macro_results$lower_flat)
+```
+
+
+
+Ephemeroptera 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_may,
+           macro_results$upper_may, 
+           macro_results$lower_may)
+```
+
+
+Trichoptera 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_trich,
+           macro_results$upper_trich, 
+           macro_results$lower_trich)
+```
+Odonata 
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_dragon,
+           macro_results$upper_dragon, 
+           macro_results$lower_dragon)
+```
