@@ -1,0 +1,200 @@
+---
+title: "Extracting INCA scenarios"
+author: "James Orr"
+output:
+   html_notebook:
+     code_folding: hide
+     theme: flatly
+     toc: true
+     toc_depth: 4
+     number_sections: no
+---
+
+Here I will extract the relevant INCA outputs for the different scenarios, which I can then plug into my regression models. 
+
+**Set up environment**
+
+```{r, echo=TRUE, results='hide'}
+#### Clear  environment 
+rm(list = ls())         
+
+#### Required packages
+library(tidyverse)        # for general use
+library(readxl)
+library(tibble)
+```
+
+**Load data** 
+
+```{r}
+#### No land-use change ####
+no_land_median <- read_excel("summary_2080s.xlsx",
+                             sheet = "median_month")
+
+no_land_lower <- read_excel("summary_2080s.xlsx",
+                             sheet = "lower_month")
+
+no_land_upper <- read_excel("summary_2080s.xlsx",
+                             sheet = "upper_month")
+
+#### Agricultural intensification ####
+
+agri_median <- read_excel("summary_2080s_agri.xlsx",
+                             sheet = "median_month")
+
+agri_lower <- read_excel("summary_2080s_agri.xlsx",
+                             sheet = "lower_month")
+
+agri_upper <- read_excel("summary_2080s_agri.xlsx",
+                             sheet = "upper_month")
+
+#### Agricultural intensification + P removal ####
+
+agri_P_median <- read_excel("summary_2080s_agri_P.xlsx",
+                             sheet = "median_month")
+
+agri_P_lower <- read_excel("summary_2080s_agri_P.xlsx",
+                             sheet = "lower_month")
+
+agri_P_upper <- read_excel("summary_2080s_agri_P.xlsx",
+                             sheet = "upper_month")
+
+```
+
+Create and run function that will organise each spreadsheet 
+
+```{r}
+
+data_cleaning <- function(dataset, landuse, estimate) {
+  
+  dataset <- dataset %>%
+    # select summer months 
+    filter(...1 %in% c(6, 7, 8)) %>%
+    
+    # difference in flow %>%
+    mutate(Crick_rcp26_flow_diff = rcp26_TR01_flow-baseline_TR01_flow) %>%
+    mutate(Crick_rcp45_flow_diff = rcp45_TR01_flow-baseline_TR01_flow) %>%
+    mutate(Ox_rcp26_flow_diff = rcp26_TR06_flow-baseline_TR06_flow) %>%
+    mutate(Ox_rcp45_flow_diff = rcp45_TR06_flow-baseline_TR06_flow) %>%
+    mutate(Lon_rcp26_flow_diff = rcp26_TR22_flow-baseline_TR22_flow) %>%
+    mutate(Lon_rcp45_flow_diff = rcp45_TR22_flow-baseline_TR22_flow) %>%
+    mutate(Caver_rcp45_flow_diff = rcp45_TR13_flow-baseline_TR13_flow) %>%
+    mutate(Caver_rcp26_flow_diff = rcp26_TR13_flow-baseline_TR13_flow) %>%
+    mutate(Egham_rcp26_flow_diff = rcp26_TR19_flow-baseline_TR19_flow) %>%
+    mutate(Egham_rcp45_flow_diff = rcp45_TR19_flow-baseline_TR19_flow) %>%
+    
+    # difference in Temperature %>%
+    mutate(Crick_rcp26_temp_diff = rcp26_TR01_watertemperature-baseline_TR01_watertemperature) %>%
+    mutate(Crick_rcp45_temp_diff = rcp45_TR01_watertemperature-baseline_TR01_watertemperature) %>%
+    mutate(Ox_rcp26_temp_diff = rcp26_TR06_watertemperature-baseline_TR06_watertemperature) %>%
+    mutate(Ox_rcp45_temp_diff = rcp45_TR06_watertemperature-baseline_TR06_watertemperature) %>%
+    mutate(Lon_rcp26_temp_diff = rcp26_TR22_watertemperature-baseline_TR22_watertemperature) %>%
+    mutate(Lon_rcp45_temp_diff = rcp45_TR22_watertemperature-baseline_TR22_watertemperature) %>%
+    mutate(Caver_rcp26_temp_diff = rcp26_TR13_watertemperature-baseline_TR13_watertemperature) %>%
+    mutate(Caver_rcp45_temp_diff = rcp45_TR13_watertemperature-baseline_TR13_watertemperature) %>%
+    mutate(Egham_rcp26_temp_diff = rcp26_TR19_watertemperature-baseline_TR19_watertemperature) %>%
+    mutate(Egham_rcp45_temp_diff = rcp45_TR19_watertemperature-baseline_TR19_watertemperature) %>%
+    
+    # difference in P %>%
+    mutate(Crick_rcp26_P_diff = rcp26_TR01_watercolSRP-baseline_TR01_watercolSRP) %>%
+    mutate(Crick_rcp45_P_diff = rcp45_TR01_watercolSRP-baseline_TR01_watercolSRP) %>%
+    mutate(Ox_rcp26_P_diff = rcp26_TR06_watercolSRP-baseline_TR06_watercolSRP) %>%
+    mutate(Ox_rcp45_P_diff = rcp45_TR06_watercolSRP-baseline_TR06_watercolSRP) %>%
+    mutate(Lon_rcp26_P_diff = rcp26_TR22_watercolSRP-baseline_TR22_watercolSRP) %>%
+    mutate(Lon_rcp45_P_diff = rcp45_TR22_watercolSRP-baseline_TR22_watercolSRP) %>%
+    mutate(Caver_rcp26_P_diff = rcp26_TR13_watercolSRP-baseline_TR13_watercolSRP) %>%
+    mutate(Caver_rcp45_P_diff = rcp45_TR13_watercolSRP-baseline_TR13_watercolSRP) %>%
+    mutate(Egham_rcp26_P_diff = rcp26_TR19_watercolSRP-baseline_TR19_watercolSRP) %>%
+    mutate(Egham_rcp45_P_diff = rcp45_TR19_watercolSRP-baseline_TR19_watercolSRP) %>%
+    
+    # difference in DO %>%
+    mutate(Crick_rcp26_DO_diff = rcp26_TR01_dissolvedoxygen-baseline_TR01_dissolvedoxygen) %>%
+    mutate(Crick_rcp45_DO_diff = rcp45_TR01_dissolvedoxygen-baseline_TR01_dissolvedoxygen) %>%
+    mutate(Ox_rcp26_DO_diff = rcp26_TR06_dissolvedoxygen-baseline_TR06_dissolvedoxygen) %>%
+    mutate(Ox_rcp45_DO_diff = rcp45_TR06_dissolvedoxygen-baseline_TR06_dissolvedoxygen) %>%
+    mutate(Lon_rcp26_DO_diff = rcp26_TR22_dissolvedoxygen-baseline_TR22_dissolvedoxygen) %>%
+    mutate(Lon_rcp45_DO_diff = rcp45_TR22_dissolvedoxygen-baseline_TR22_dissolvedoxygen) %>%
+    mutate(Caver_rcp26_DO_diff = rcp26_TR13_dissolvedoxygen-baseline_TR13_dissolvedoxygen) %>%
+    mutate(Caver_rcp45_DO_diff = rcp45_TR13_dissolvedoxygen-baseline_TR13_dissolvedoxygen) %>%
+    mutate(Egham_rcp26_DO_diff = rcp26_TR19_dissolvedoxygen-baseline_TR19_dissolvedoxygen) %>%
+    mutate(Egham_rcp45_DO_diff = rcp45_TR19_dissolvedoxygen-baseline_TR19_dissolvedoxygen) %>%
+    
+    # difference in Nitrate %>%
+    mutate(Crick_rcp26_Ni_diff = rcp26_TR01_nitrate-baseline_TR01_nitrate) %>%
+    mutate(Crick_rcp45_Ni_diff = rcp45_TR01_nitrate-baseline_TR01_nitrate) %>%
+    mutate(Ox_rcp26_Ni_diff = rcp26_TR06_nitrate-baseline_TR06_nitrate) %>%
+    mutate(Ox_rcp45_Ni_diff = rcp45_TR06_nitrate-baseline_TR06_nitrate) %>%
+    mutate(Lon_rcp26_Ni_diff = rcp26_TR22_nitrate-baseline_TR22_nitrate) %>%
+    mutate(Lon_rcp45_Ni_diff = rcp45_TR22_nitrate-baseline_TR22_nitrate) %>%
+    mutate(Caver_rcp26_Ni_diff = rcp26_TR13_nitrate-baseline_TR13_nitrate) %>%
+    mutate(Caver_rcp45_Ni_diff = rcp45_TR13_nitrate-baseline_TR13_nitrate) %>%
+    mutate(Egham_rcp26_Ni_diff = rcp26_TR19_nitrate-baseline_TR19_nitrate) %>%
+    mutate(Egham_rcp45_Ni_diff = rcp45_TR19_nitrate-baseline_TR19_nitrate) %>%
+    
+    # difference in Ammonium %>%
+    mutate(Crick_rcp26_Am_diff = rcp26_TR01_ammonium-baseline_TR01_ammonium) %>%
+    mutate(Crick_rcp45_Am_diff = rcp45_TR01_ammonium-baseline_TR01_ammonium) %>%
+    mutate(Ox_rcp26_Am_diff = rcp26_TR06_ammonium-baseline_TR06_ammonium) %>%
+    mutate(Ox_rcp45_Am_diff = rcp45_TR06_ammonium-baseline_TR06_ammonium) %>%
+    mutate(Lon_rcp26_Am_diff = rcp26_TR22_ammonium-baseline_TR22_ammonium) %>%
+    mutate(Lon_rcp45_Am_diff = rcp45_TR22_ammonium-baseline_TR22_ammonium) %>%
+    mutate(Caver_rcp26_Am_diff = rcp26_TR13_ammonium-baseline_TR13_ammonium) %>%
+    mutate(Caver_rcp45_Am_diff = rcp45_TR13_ammonium-baseline_TR13_ammonium) %>%
+    mutate(Egham_rcp26_Am_diff = rcp26_TR19_ammonium-baseline_TR19_ammonium) %>%
+    mutate(Egham_rcp45_Am_diff = rcp45_TR19_ammonium-baseline_TR19_ammonium) %>%
+    
+    # select difference variables 
+    select(107:166) %>%
+    
+    # calculate means (mean monthly difference for each variable) 
+    summarise_all(mean) 
+  
+  # convert to longer form 
+  dataset <- as.data.frame(t(dataset))
+  dataset <- rownames_to_column(dataset, "variable")
+  
+  # add informative variables 
+  dataset <- dataset %>%
+    separate(variable, sep = "_", into = c("Site", "RCP", "Variable", "null")) %>%
+    select(-null) %>%
+    rename(Differences = V1) %>%
+    mutate(Estimate = estimate) %>%
+    mutate(LandUse = landuse)
+  
+  return(dataset)
+  
+}
+
+
+```
+
+Apply function to the 9 datasets (3 land use x 3 estimates)
+
+```{r}
+
+no_land_median_clean <- data_cleaning(no_land_median, "no_land", "median")
+no_land_upper_clean <- data_cleaning(no_land_upper, "no_land", "upper")
+no_land_lower_clean <- data_cleaning(no_land_lower, "no_land", "lower")
+
+agri_median_clean <- data_cleaning(agri_median, "agri", "median")
+agri_upper_clean <- data_cleaning(agri_upper, "agri", "upper")
+agri_lower_clean <- data_cleaning(agri_lower, "agri", "lower")
+
+agri_P_median_clean <- data_cleaning(agri_P_median, "agri_P", "median")
+agri_P_upper_clean <- data_cleaning(agri_P_upper, "agri_P", "upper")
+agri_P_lower_clean <- data_cleaning(agri_P_lower, "agri_P", "lower")
+
+```
+
+Combine into one dataset and save 
+
+```{r}
+scenarios <- rbind(no_land_median_clean, no_land_upper_clean, no_land_lower_clean,
+                     agri_median_clean, agri_upper_clean, agri_lower_clean,
+                     agri_P_median_clean, agri_P_upper_clean, agri_P_lower_clean)
+
+write.csv(scenarios, "scenarios.csv")
+```
+
+
+
