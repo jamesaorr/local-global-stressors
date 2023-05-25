@@ -94,9 +94,9 @@ river_sites <- st_as_sf(river_sites, coords = c("easting", "northing")) %>%
 
 
 ### London ###
-london <- st_read("data/geo/london/London_Borough_Excluding_MHW.shp") %>%
-  st_set_crs(., 27700)
-london<-st_union(london)
+#london <- st_read("data/geo/london/London_Borough_Excluding_MHW.shp") %>%
+#  st_set_crs(., 27700)
+#l3ondon<-st_union(london)
 
 ```
 
@@ -148,7 +148,7 @@ macro_data <- macro_data %>%
   drop_na()  # llmer requires full cases 
 
 # Need to go back and grab the full eastings and full northings 
-data_site <- read.csv("data/eco/inverts/INV_OPEN_DATA_SITE_2022-02-01.csv", 
+data_site <- read.csv("data/eco/inverts/INV_OPEN_DATA_SITE_2023-05-22.csv", 
                      header = T)
 
 data_site <- data_site %>%
@@ -159,10 +159,18 @@ data_site$SITE_ID <- as.character(data_site$SITE_ID)
 
 macro_data <- left_join(macro_data, data_site, by = "SITE_ID")
 
+count <- macro_data %>%
+  count(SITE_ID)
+macro_data <- left_join(macro_data, count, by = "SITE_ID")
+macro_data <- macro_data %>%
+  filter(n > 1)
+
 macro_data <- st_as_sf(macro_data, coords = c("FULL_EASTING", 
                                               "FULL_NORTHING")) %>%
   st_set_crs(., 27700) %>%
   filter(st_within(x = ., y = catchment_main, sparse = FALSE))
+
+
 ```
 
 ```{r}
@@ -788,6 +796,46 @@ plot_score(macro_results$site_rank,
            macro_results$lower_rich)
 ```
 
+LIFE
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_life,
+           macro_results$upper_life, 
+           macro_results$lower_life)
+```
+
+DEHLI
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_dehli,
+           macro_results$upper_dehli, 
+           macro_results$lower_dehli)
+```
+
+EPT Abundance
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_ept_abun,
+           macro_results$upper_ept_abun, 
+           macro_results$lower_ept_abun)
+```
+
+EPT Richness
+
+```{r, fig.height=2.5, fig.width=2, dpi = 300}
+
+plot_score(macro_results$site_rank,
+           macro_results$median_ept_rich,
+           macro_results$upper_ept_rich, 
+           macro_results$lower_ept_rich)
+```
+
 
 Plecoptera 
 
@@ -812,14 +860,14 @@ plot_score(macro_results$site_rank,
 
 
 
-Coleoptera 
+Diptera 
 
 ```{r, fig.height=2.5, fig.width=2, dpi = 300}
 
 plot_score(macro_results$site_rank,
-           macro_results$median_beet,
-           macro_results$upper_beet, 
-           macro_results$lower_beet)
+           macro_results$median_dipt,
+           macro_results$upper_dipt, 
+           macro_results$lower_dipt)
 ```
 
 
@@ -865,3 +913,100 @@ plot_score(macro_results$site_rank,
            macro_results$upper_dragon, 
            macro_results$lower_dragon)
 ```
+
+## Validation results 
+
+```{r}
+validation_data <- read.csv("data/validation_results.csv", header = T)
+
+```
+
+```{r, fig.width=6, fig.height=4}
+
+### Pearson correlation is the default of cor
+
+par(mfrow=c(2,3))
+
+############
+
+max = max(max(validation_data$aspt_predicted), max(validation_data$WHPT_ASPT))
+min = min(min(validation_data$aspt_predicted), min(validation_data$WHPT_ASPT))
+plot(validation_data$aspt_predicted, validation_data$WHPT_ASPT, main = "WHPT ASPT",
+     xlim = c(min, max), ylim = c(min, max),
+     xlab = "", ylab = "",
+     pch = 19)
+abline(0,1, lty =2)
+text(x = max, y = min, 
+     labels = paste("cor =",round(cor(validation_data$aspt_predicted, validation_data$WHPT_ASPT), 2)),
+     pos = 2, cex = 1.5)
+
+############
+
+max = max(max(validation_data$total_predicted), max(validation_data$WHPT_TOTAL))
+min = min(min(validation_data$total_predicted), min(validation_data$WHPT_TOTAL))
+plot(validation_data$total_predicted, validation_data$WHPT_TOTAL, main = "WHPT Total",
+     xlim = c(min, max), ylim = c(min, max),
+     xlab = "", ylab = "",
+     pch = 19)
+abline(0,1, lty =2)
+text(x = max, y = min, 
+     labels = paste("cor =",round(cor(validation_data$total_predicted, validation_data$WHPT_TOTAL), 2)),
+     pos = 2, cex = 1.5)
+
+############
+
+max = max(max(validation_data$dehli_predicted), max(validation_data$DEHLI))
+min = min(min(validation_data$dehli_predicted), min(validation_data$DEHLI))
+plot(validation_data$dehli_predicted, validation_data$DEHLI, main = "DEHLI",
+     xlim = c(min, max), ylim = c(min, max),
+     xlab = "", ylab = "",
+     pch = 19)
+abline(0,1, lty =2)
+text(x = max, y = min, 
+     labels = paste("cor =",round(cor(validation_data$dehli_predicted, validation_data$DEHLI), 2)),
+     pos = 2, cex = 1.5)
+
+############
+
+max = max(max(validation_data$life_predicted), max(validation_data$LIFE_SCORES_TOTAL))
+min = min(min(validation_data$life_predicted), min(validation_data$LIFE_SCORES_TOTAL))
+plot(validation_data$life_predicted, validation_data$LIFE_SCORES_TOTAL, main = "LIFE",
+     xlim = c(min, max), ylim = c(min, max),
+     xlab = "", ylab = "",
+     pch = 19)
+abline(0,1, lty =2)
+text(x = max, y = min, 
+     labels = paste("cor =",round(cor(validation_data$life_predicted, validation_data$LIFE_SCORES_TOTAL), 2)),
+     pos = 2, cex = 1.5)
+
+
+############
+
+max = max(max(validation_data$annelid_predicted), max(validation_data$annelid))
+min = min(min(validation_data$annelid_predicted), min(validation_data$annelid))
+plot(validation_data$annelid_predicted, validation_data$annelid, main = "Annelid abundance",
+     xlim = c(min, max), ylim = c(min, max),
+     xlab = "predicted", ylab = "",
+     pch = 19)
+abline(0,1, lty =2)
+text(x = max, y = min, 
+     labels = paste("cor =",round(cor(validation_data$annelid_predicted, validation_data$annelid), 2)),
+     pos = 2, cex = 1.5)
+
+############
+
+max = max(max(validation_data$ept_rich_predicted), max(validation_data$ept_richness))
+min = min(min(validation_data$ept_rich_predicted), min(validation_data$ept_richness))
+plot(validation_data$ept_rich_predicted, validation_data$ept_richness, main = "EPT Richness",
+     xlim = c(min, max), ylim = c(min, max),
+     xlab = "", ylab = "",
+     pch = 19)
+abline(0,1, lty =2)
+text(x = max, y = min, 
+     labels = paste("cor =",round(cor(validation_data$ept_rich_predicted, validation_data$ept_richness), 2)),
+     pos = 2, cex = 1.5)
+
+
+```
+
+

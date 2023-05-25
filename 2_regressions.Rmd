@@ -13,7 +13,7 @@ output:
 
 ## Introduction
 
-In this notebook I do a small amount of organising and exploring of the combined water quality and invert data. I then run linear mixed effects models to create some "offline" models that we can use to make predictions using the INCA model scenario outcomes. 
+In this notebook I do a small amount of organising of the combined water quality and invert data. I then run generalized linear mixed effects models to create macroinvertebrates models that we can use to make predictions based on the INCA modeling outcomes. 
 
 Response variables that can be predicted by INCA are: 
 
@@ -31,9 +31,9 @@ Response variables that can be predicted by INCA are:
 
 - Ammonium (NH4) 
 
-Phosphorus, dissolved oxygen, temperature and nitrate are all be directly incorporated into my regressions using EA data. Flow can be estimated and ammonium can be approximated using ammonia. Chlorophyll a can't be included because of insufficient data in the EA water quality dataset. 
+Phosphorus, dissolved oxygen, temperature and nitrate are all directly incorporated into my regressions using EA data. Flow can be estimated and ammonium can be approximated using ammonia. Chlorophyll a can't be included because of insufficient data in the EA water quality dataset. 
 
-We can also include some strong predictor variables that aren't in INCA (e.g., describing habitat quality). We will also include random effect for site to account for repeated measures across years. 
+We will also include some strong predictor variables that aren't in INCA (e.g., describing habitat quality) so that we have accurate estimates for the variables that are in INCA. We will also include random effect for site to account for repeated measures across years. 
 
 ## Data preparation
 
@@ -50,6 +50,7 @@ library(lme4)             # for lmer() function
 library(MuMIn)            # to get r squared for lme4 models
 library(lmerTest)         # to get p values for lme4 models
 library(DHARMa)           # for diagnostics of glmm models 
+library(sf)               # classes and functions for vector data
 
 ```
 
@@ -62,7 +63,7 @@ glmm_data <- list.files(path = "data/combined/",
   map_df(~read_csv(., col_types = cols(.default = "c"))) 
 ```
 
-**Select the variables we're broadly interested in**
+**Select the variables we're interested in**
 
 ```{r}
 glmm_data <- glmm_data %>%
@@ -86,7 +87,6 @@ glmm_data <- glmm_data %>%
           # response variables 
           WHPT_ASPT, WHPT_TOTAL, 
           macro_richness, 
-          mollusc, 
           total_abundance,
           ept_richness,
           ept_abundance,
@@ -95,13 +95,19 @@ glmm_data <- glmm_data %>%
           `insect - mayfly (Ephemeroptera)`,
           `insect - dragonfly (Odonata)`,
           `insect - caddis fly (Trichoptera)`,
-          `insect - beetle (Coleoptera)`,
           `flatworm (Turbellaria)`,
-          crustacean,
-          annelid)) %>%
+          #`insect - beetle (Coleoptera)`,
+          #crustacean,
+          #mollusc, 
+          annelid,
+          LIFE_SCORES_TOTAL,
+          DEHLI,
+          
+          # Coordinates
+          EASTING,
+          NORTHING)) %>%
   
   drop_na()  # llmer requires full cases 
-
 
 # convert all to numeric 
 glmm_data <- data.frame(lapply(glmm_data, function(x) as.numeric(as.character(x))))
@@ -111,14 +117,6 @@ glmm_data$SITE_ID <- as.factor(glmm_data$SITE_ID)
 
 ```
 
-**Count observations per site**
-
-```{r}
-#count <- glmm_data %>%
-#  count(SITE_ID)
-#glmm_data <- left_join(glmm_data, count, by = "SITE_ID")
-#table(count$n)
-```
 
 **Create a variable for flow (based on EA discharge classes)**
 
@@ -139,9 +137,35 @@ glmm_data$flow <- if_else(glmm_data$DISCHARGE == 1, 0.155,
                   if_else(glmm_data$DISCHARGE == 10, 120.0, 0
                   ))))))))))
 
-
 ```
 
+
+**Count observations per site** 
+
+Only keep sites that have at least two observations. 
+
+```{r}
+count <- glmm_data %>%
+  count(SITE_ID)
+glmm_data <- left_join(glmm_data, count, by = "SITE_ID")
+table(count$n)
+
+glmm_data <- glmm_data %>%
+  filter(n > 1)
+
+length(unique(glmm_data$SITE_ID))
+```
+
+**Subset the 2021 and 2022 data to use separately for model validation**
+
+```{r}
+validation_data <- glmm_data %>%
+  filter(SAMPLE_DATE_YEAR > 2020)
+  
+glmm_data <- glmm_data %>%
+  filter(SAMPLE_DATE_YEAR < 2021)
+
+```
 
 
 ## Data exploration
@@ -212,6 +236,7 @@ summary(aspt_model)
 r.squaredGLMM(aspt_model)
 ```
 
+
 **WHPT_TOTAL**
 
 ```{r}
@@ -238,10 +263,10 @@ r.squaredGLMM(total_model)
 ```
 
 
-**Macroinvertebrate Richness**
+**LIFE**
 
 ```{r}
-rich_model <- lmer(macro_richness ~ 
+life_model <- lmer(LIFE_SCORES_TOTAL ~ 
                 ######## physical variables #########
                 log(flow) +  
                 SILT_CLAY +
@@ -258,13 +283,35 @@ rich_model <- lmer(macro_richness ~
           
               data = glmm_data)
 
-summary(rich_model)
+summary(life_model)
 
-r.squaredGLMM(rich_model)
+r.squaredGLMM(life_model)
 ```
 
+**DEHLI**
 
+```{r}
+dehli_model <- lmer(DEHLI ~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+              data = glmm_data)
 
+summary(dehli_model)
+
+r.squaredGLMM(dehli_model)
+```
 
 ### Diagnostics 
 
@@ -296,8 +343,8 @@ ggpairs(predictors,
 par(mfrow=c(2,2))
 hist(resid(aspt_model), breaks = 30)
 hist(resid(total_model), breaks = 30)
-hist(resid(rich_model), breaks = 30)
-
+hist(resid(life_model), breaks = 30)
+hist(resid(dehli_model), breaks = 30)
 ```
 
 
@@ -306,12 +353,137 @@ hist(resid(rich_model), breaks = 30)
 ```{r}
 plot(aspt_model)
 plot(total_model)
-plot(rich_model)
+plot(life_model)
+plot(dehli_model)
+```
+
+**4. Check for spatial auto-correlation** 
+
+Plot residules in geographic space to see if there are any obvious local or global spatial auto-correlation patterns. Nothing obvious so we don't need to over complicate out models by adding spatial auto-correlation terms. 
+
+```{r}
+glmm_data$resids <- resid(aspt_model)
+#glmm_data$resids <- resid(total_model)
+#glmm_data$resids <- resid(life_model)
+#glmm_data$resids <- resid(dehli_model)
+
+
+ggplot(glmm_data, aes(x = EASTING, y = NORTHING, col = resids)) +
+  geom_point() +
+  scale_colour_gradient2()
+
+length(unique(glmm_data$SITE_ID))
 ```
 
 ### GLMMs
 
-Taxa are zero inflated and/or heavily skewed - use Poisson distribution with glmer function.
+Abundance and richness are count data that are zero inflated and/or heavily skewed - use Poisson distribution with glmer function and test assumptions with DHARMA. Convergence of models is tricky with some - but isn't a major problem based on: https://rstudio-pubs-static.s3.amazonaws.com/33653_57fc7b8e5d484c909b615d8633c01d51.html 
+
+**Total Richness**
+
+```{r}
+rich_model <- glmer(glmm_data$macro_richness~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence try different optimizers and increase iterations
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e8)))
+                #control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e8)))
+                #control=glmerControl(optimizer="nloptwrap",optCtrl=list(maxfun=2e8)))
+
+
+summary(rich_model)
+
+r.squaredGLMM(rich_model)
+
+```
+
+**EPT Richness**
+
+```{r}
+ept_rich_model <- glmer(glmm_data$ept_richness~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence try different optimizers and increase iterations
+                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+                #control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e5)))
+                #control=glmerControl(optimizer="nloptwrap",optCtrl=list(maxfun=2e5)))
+
+summary(ept_rich_model)
+
+r.squaredGLMM(ept_rich_model)
+
+```
+
+**EPT Abundance**
+
+```{r}
+ept_abun_model <- glmer(glmm_data$ept_abundance~ 
+                ######## physical variables #########
+                log(flow) +  
+                SILT_CLAY +
+                
+                ######## water quality variables #########
+                Temperature.of.Water_cel +           
+                Oxygen..Dissolved.as.O2_mg.l + 
+                log(Orthophosphate..reactive.as.P_mg.l) +    
+                log(`Nitrate.as.N_mg.l`) +   
+                log(`Ammonia.un.ionised.as.N_mg.l`) +
+                  
+                ######## random effect of site  #########
+                (1 | SITE_ID),
+          
+                #### error distribution #### 
+                family = "poisson",
+                
+                data = glmm_data,
+                
+                # to help with model convergence try different optimizers and increase iterations
+                #control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+                control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e5)))
+                #control=glmerControl(optimizer="nloptwrap",optCtrl=list(maxfun=2e5)))
+
+
+
+summary(ept_abun_model)
+
+r.squaredGLMM(ept_abun_model)
+
+
+```
 
 
 **Plecoptera Abundance**
@@ -337,8 +509,12 @@ plecoptera_model <- glmer(glmm_data$insect...stonefly..Plecoptera.~
                 
                 data = glmm_data,
                 
-                # to help with model convergence
-                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+                # to help with model convergence try different optimizers and increase iterations
+                #control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e8)))
+                control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e8)))
+                #control=glmerControl(optimizer="nloptwrap",optCtrl=list(maxfun=2e8)))
+
+
 
 summary(plecoptera_model)
 
@@ -373,7 +549,9 @@ annelid_model <- glmer(glmm_data$annelid ~
                 data = glmm_data,
                 
                 # to help with model convergence
-                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+                #control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6)))
+                control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e6)))
+                #control=glmerControl(optimizer="nloptwrap",optCtrl=list(maxfun=2e6)))
 
 summary(annelid_model)
 
@@ -415,7 +593,6 @@ r.squaredGLMM(trichoptera_model)
 
 
 ```
-
 
 
 **Ephemeroptera Abundance**
@@ -486,11 +663,11 @@ r.squaredGLMM(dragon_model)
 
 ```
 
-**Coleoptera Abundance**
+**Diptera Abundance**
 
 ```{r}
 
-beet_model <- glmer(glmm_data$insect...beetle..Coleoptera. ~ 
+dipt_model <- glmer(glmm_data$insect...true.fly..Diptera. ~ 
                 ######## physical variables #########
                 log(flow) +  
                 SILT_CLAY +
@@ -511,11 +688,13 @@ beet_model <- glmer(glmm_data$insect...beetle..Coleoptera. ~
                 data = glmm_data,
                 
                 # to help with model convergence
-                control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e5)))
+                #control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e6)))
+                control=glmerControl(optimizer="Nelder_Mead",optCtrl=list(maxfun=2e6)))
+                #control=glmerControl(optimizer="nloptwrap",optCtrl=list(maxfun=2e6)))
 
-summary(beet_model)
+summary(dipt_model)
 
-r.squaredGLMM(beet_model)
+r.squaredGLMM(dipt_model)
 
 
 ```
@@ -554,18 +733,23 @@ r.squaredGLMM(flat_model)
 
 ```
 
-
 ### Diagnostics
 
 ```{r}
 
 # only consider groups whose regression models are above 0.1. This includes:
-# flat_model, beet_model, dragon_model, mayfly_model, trichoptera_model, plecoptera_model, annelid_model
-
-# excluded groups due to poorly fitting regressions = Diptera, Mollusca, Crustacean
+# flat_model, dipt_model, dragon_model, mayfly_model, trichoptera_model, plecoptera_model, annelid_model
+# excluded groups due to poorly fitting regressions = Coleoptera, Mollusca, Crustacean
 
 
 ### Obtain informative versions of residuals###
+
+simulationOutput_rich <- simulateResiduals(fittedModel = rich_model, 
+                                            plot = F)
+simulationOutput_ept_rich <- simulateResiduals(fittedModel = ept_rich_model, 
+                                            plot = F)
+simulationOutput_ept_abun <- simulateResiduals(fittedModel = ept_abun_model, 
+                                            plot = F)
 simulationOutput_stone <- simulateResiduals(fittedModel = plecoptera_model, 
                                             plot = F)
 simulationOutput_worm <- simulateResiduals(fittedModel = annelid_model, 
@@ -574,16 +758,21 @@ simulationOutput_caddis <- simulateResiduals(fittedModel = trichoptera_model,
                                             plot = F)
 simulationOutput_flat <- simulateResiduals(fittedModel = flat_model, 
                                             plot = F)
-simulationOutput_beet <- simulateResiduals(fittedModel = beet_model, 
+simulationOutput_dipt <- simulateResiduals(fittedModel = dipt_model, 
                                             plot = F)
 simulationOutput_dragon <- simulateResiduals(fittedModel = dragon_model, 
                                             plot = F)
 simulationOutput_may <- simulateResiduals(fittedModel = mayfly_model, 
                                             plot = F)
 
-
 # check normality of residules (specific tests too sensitive to large n)
-par(mfrow=c(2,4))
+par(mfrow=c(2,5))
+plotQQunif(simulationOutput_rich, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "Total Richness",
+           pch = 19, cex = 0.2) 
 plotQQunif(simulationOutput_stone, 
            testUniformity = F, 
            testOutliers = F,
@@ -608,7 +797,7 @@ plotQQunif(simulationOutput_flat,
            testDispersion = F,
            main = "Flatworms",
            pch = 19, cex = 0.2) 
-plotQQunif(simulationOutput_beet, 
+plotQQunif(simulationOutput_dipt, 
            testUniformity = F, 
            testOutliers = F,
            testDispersion = F,
@@ -626,27 +815,40 @@ plotQQunif(simulationOutput_may,
            testDispersion = F,
            main = "Ephemeroptera",
            pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_ept_abun, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "EPT Abundance",
+           pch = 19, cex = 0.2) 
+plotQQunif(simulationOutput_ept_rich, 
+           testUniformity = F, 
+           testOutliers = F,
+           testDispersion = F,
+           main = "EPT Richness",
+           pch = 19, cex = 0.2) 
 
 
 # check residules v predicted (specific tests too sensitive to large n)
-par(mfrow=c(2,4))
+par(mfrow=c(2,5))
+plotResiduals(simulationOutput_rich, quantreg = F, pch = 19, cex = 0.2)#, main = "Plecoptera")
 plotResiduals(simulationOutput_stone, quantreg = F, pch = 19, cex = 0.2)#, main = "Plecoptera")
 plotResiduals(simulationOutput_worm, quantreg = F, pch = 19, cex = 0.2)#, main = "Annelida")
 plotResiduals(simulationOutput_flat, quantreg = F, pch = 19, cex = 0.2)#, main = "Tricoptera")
 plotResiduals(simulationOutput_caddis, quantreg = F, pch = 19, cex = 0.2)#, main = "Flatworms")
-plotResiduals(simulationOutput_beet, quantreg = F, pch = 19, cex = 0.2)#, main = "Coleoptera")
+plotResiduals(simulationOutput_dipt, quantreg = F, pch = 19, cex = 0.2)#, main = "Diptera")
 plotResiduals(simulationOutput_dragon, quantreg = F, pch = 19, cex = 0.2)#, main = "Odonata")
 plotResiduals(simulationOutput_may, quantreg = F, pch = 19, cex = 0.2)#, main = "Ephemeroptera")
+plotResiduals(simulationOutput_ept_abun, quantreg = F, pch = 19, cex = 0.2)#, main = "EPT Abundance")
+plotResiduals(simulationOutput_ept_rich, quantreg = F, pch = 19, cex = 0.2)#, main = "EPT Richness")
 ```
 Some deviations from statistical tests, but not enough to rule out the models. 
-
 
 
 ## Predictions 
 
 
-As we have linear models with no interactions or polynomials we can just take arbitrary values for a baseline (e.g., mean values the variables in the "modern" dataset). We can calculate macroinvertebrate scores for this baseline. Then we change the baseline values for the explanatory variables by how much INCA predicts for each scenario. Then we calculate the macroinvertebrate scores again and measure the difference. We can plot the data as points (median INCA predictions) with error bars (INCA upper and lower percentiles). We are not making ***specific*** predictions about what the macroinvertebrate score will be at a specific site. Instead, we are just asking what the change will be due to changes in the fixed effects. So calculating the prediction intervals (using standard error of regression models) doesn't make much sense. If we wanted to predict a specific score, we would need to account for the standard error of the regression model coefficients and we would need to report the prediction interval. We would need to do this for the range of INCA results as well - so there would be considerable error propagation. Instead, we are just interested in change so we just need to carry through the INCA uncertainty to the forecast uncertainty. 
-
+As we have linear models with no interactions or polynomials we can just take arbitrary values for a baseline (e.g., mean values the variables in the "modern" dataset). This holds for the basic linear mixed effects models but also the poisson glmms except the coefficients are multiplicative as there are log link functions (https://www.dataquest.io/blog/tutorial-poisson-regression-in-r/). We can calculate macroinvertebrate scores for this baseline. Then we change the baseline values for the explanatory variables by how much INCA predicts for each scenario. Then we calculate the macroinvertebrate scores again and measure the difference. We can plot the data as points (median INCA predictions) with error bars (INCA upper and lower percentiles). We are not making specific predictions about what the macroinvertebrate score will be at a specific site. Instead, we are just asking what the change will be due to changes in the fixed effects. So calculating the prediction intervals (using standard error of regression models) doesn't make much sense. If we wanted to predict a specific score, we would need to account for the standard error of the regression model coefficients and we would need to report the prediction interval. We would need to do this for the range of INCA results as well - so there would be considerable error propagation. Instead, we are just interested in change so we just need to carry through the INCA uncertainty to the forecast uncertainty. 
 
 
 
@@ -670,20 +872,22 @@ baseline <- data.frame(flow, Temperature.of.Water_cel,
                             Nitrate.as.N_mg.l, SITE_ID)
 
 # Calculate macroinvertebrate scores for baselines 
-baseline_aspt <- predict(aspt_model, baseline)
-baseline_total <- predict(total_model, baseline)
-baseline_rich <- predict(rich_model, baseline)
-baseline_stone <- predict(plecoptera_model, baseline)
-baseline_worms <- predict(annelid_model, baseline)
-baseline_flat <- predict(flat_model, baseline)
-baseline_beet <- predict(beet_model, baseline)
-baseline_dragon <- predict(dragon_model, baseline)
-baseline_may <- predict(mayfly_model, baseline)
-baseline_trich <- predict(trichoptera_model, baseline)
-
+baseline_aspt <- predict(aspt_model, baseline, type = "response")
+baseline_total <- predict(total_model, baseline, type = "response")
+baseline_rich <- predict(rich_model, baseline, type = "response")
+baseline_stone <- predict(plecoptera_model, baseline, type = "response")
+baseline_worms <- predict(annelid_model, baseline, type = "response")
+baseline_flat <- predict(flat_model, baseline, type = "response")
+baseline_dipt <- predict(dipt_model, baseline, type = "response")
+baseline_dragon <- predict(dragon_model, baseline, type = "response")
+baseline_may <- predict(mayfly_model, baseline, type = "response")
+baseline_trich <- predict(trichoptera_model, baseline, type = "response")
+baseline_life <- predict(life_model, baseline, type = "response")
+baseline_dehli <- predict(dehli_model, baseline, type = "response")
+baseline_ept_rich <- predict(ept_rich_model, baseline, type = "response")
+baseline_ept_abun <- predict(ept_abun_model, baseline, type = "response")
 
 ```
-
 
 
 **Load in scenarios** 
@@ -696,7 +900,6 @@ scenarios <- read.csv("data/scenarios/scenarios.csv",
 scenarios$Variable <- gsub("flow", "Fl", scenarios$Variable)
 
 ```
-
 
 **define a function for making the predictions**
 
@@ -728,16 +931,20 @@ macro_predictions <- function(location, climate, land) {
     mutate(Nitrate.as.N_mg.l = baseline$Nitrate.as.N_mg.l + Ni) %>%
     mutate(Ammonia.un.ionised.as.N_mg.l = baseline$Ammonia.un.ionised.as.N_mg.l + Am) 
   
-  median_aspt <- predict(aspt_model, median) - baseline_aspt
-  median_total <- predict(total_model, median) - baseline_total
-  median_rich <- predict(rich_model, median) - baseline_rich
-  median_stone <- predict(plecoptera_model, median) - baseline_stone
-  median_worm <- predict(annelid_model, median) - baseline_worms
-  median_flat <- predict(flat_model, median) - baseline_flat
-  median_beet <- predict(beet_model, median) - baseline_beet
-  median_dragon <- predict(dragon_model, median) - baseline_dragon
-  median_may <- predict(mayfly_model, median) - baseline_may
-  median_trich <- predict(trichoptera_model, median) - baseline_trich
+  median_aspt <- predict(aspt_model, median, type = "response") - baseline_aspt
+  median_total <- predict(total_model, median, type = "response") - baseline_total
+  median_rich <- predict(rich_model, median, type = "response") - baseline_rich
+  median_stone <- predict(plecoptera_model, median, type = "response") - baseline_stone
+  median_worm <- predict(annelid_model, median, type = "response") - baseline_worms
+  median_flat <- predict(flat_model, median, type = "response") - baseline_flat
+  median_dipt <- predict(dipt_model, median, type = "response") - baseline_dipt
+  median_dragon <- predict(dragon_model, median, type = "response") - baseline_dragon
+  median_may <- predict(mayfly_model, median, type = "response") - baseline_may
+  median_trich <- predict(trichoptera_model, median, type = "response") - baseline_trich
+  median_life <- predict(life_model, median, type = "response") - baseline_life
+  median_dehli <- predict(dehli_model, median, type = "response") - baseline_dehli
+  median_ept_rich <- predict(ept_rich_model, median, type = "response") - baseline_ept_rich
+  median_ept_abun <- predict(ept_abun_model, median, type = "response") - baseline_ept_abun
 
   
   
@@ -757,16 +964,20 @@ macro_predictions <- function(location, climate, land) {
     mutate(Nitrate.as.N_mg.l = baseline$Nitrate.as.N_mg.l + Ni) %>%
     mutate(Ammonia.un.ionised.as.N_mg.l = baseline$Ammonia.un.ionised.as.N_mg.l + Am) 
   
-  lower_aspt <- predict(aspt_model, lower) - baseline_aspt
-  lower_total <- predict(total_model, lower) - baseline_total
-  lower_rich <- predict(rich_model, lower) - baseline_rich
-  lower_stone <- predict(plecoptera_model, lower) - baseline_stone
-  lower_worm <- predict(annelid_model, lower) - baseline_worms
-  lower_flat <- predict(flat_model, lower) - baseline_flat
-  lower_beet <- predict(beet_model, lower) - baseline_beet
-  lower_dragon <- predict(dragon_model, lower) - baseline_dragon
-  lower_may <- predict(mayfly_model, lower) - baseline_may
-  lower_trich <- predict(trichoptera_model, lower) - baseline_trich
+  lower_aspt <- predict(aspt_model, lower, type = "response") - baseline_aspt
+  lower_total <- predict(total_model, lower, type = "response") - baseline_total
+  lower_rich <- predict(rich_model, lower, type = "response") - baseline_rich
+  lower_stone <- predict(plecoptera_model, lower, type = "response") - baseline_stone
+  lower_worm <- predict(annelid_model, lower, type = "response") - baseline_worms
+  lower_flat <- predict(flat_model, lower, type = "response") - baseline_flat
+  lower_dipt <- predict(dipt_model, lower, type = "response") - baseline_dipt
+  lower_dragon <- predict(dragon_model, lower, type = "response") - baseline_dragon
+  lower_may <- predict(mayfly_model, lower, type = "response") - baseline_may
+  lower_trich <- predict(trichoptera_model, lower, type = "response") - baseline_trich
+  lower_life <- predict(life_model, lower, type = "response") - baseline_life
+  lower_dehli <- predict(dehli_model, lower, type = "response") - baseline_dehli
+  lower_ept_rich <- predict(ept_rich_model, lower, type = "response") - baseline_ept_rich
+  lower_ept_abun <- predict(ept_abun_model, lower, type = "response") - baseline_ept_abun
   
   #### Upper ####
   upper <- data_test %>%
@@ -784,24 +995,28 @@ macro_predictions <- function(location, climate, land) {
     mutate(Nitrate.as.N_mg.l = baseline$Nitrate.as.N_mg.l + Ni) %>%
     mutate(Ammonia.un.ionised.as.N_mg.l = baseline$Ammonia.un.ionised.as.N_mg.l + Am) 
   
-  upper_aspt <- predict(aspt_model, upper) - baseline_aspt
-  upper_total <- predict(total_model, upper) - baseline_total
-  upper_rich <- predict(rich_model, upper) - baseline_rich
-  upper_stone <- predict(plecoptera_model, upper) - baseline_stone
-  upper_worm <- predict(annelid_model, upper) - baseline_worms
-  upper_flat <- predict(flat_model, upper) - baseline_flat
-  upper_beet <- predict(beet_model, upper) - baseline_beet
-  upper_dragon <- predict(dragon_model, upper) - baseline_dragon
-  upper_may <- predict(mayfly_model, upper) - baseline_may
-  upper_trich <- predict(trichoptera_model, upper) - baseline_trich
+  upper_aspt <- predict(aspt_model, upper, type = "response") - baseline_aspt
+  upper_total <- predict(total_model, upper, type = "response") - baseline_total
+  upper_rich <- predict(rich_model, upper, type = "response") - baseline_rich
+  upper_stone <- predict(plecoptera_model, upper, type = "response") - baseline_stone
+  upper_worm <- predict(annelid_model, upper, type = "response") - baseline_worms
+  upper_flat <- predict(flat_model, upper, type = "response") - baseline_flat
+  upper_dipt <- predict(dipt_model, upper, type = "response") - baseline_dipt
+  upper_dragon <- predict(dragon_model, upper, type = "response") - baseline_dragon
+  upper_may <- predict(mayfly_model, upper, type = "response") - baseline_may
+  upper_trich <- predict(trichoptera_model, upper, type = "response") - baseline_trich
+  upper_life <- predict(life_model, upper, type = "response") - baseline_life
+  upper_dehli <- predict(dehli_model, upper, type = "response") - baseline_dehli
+  upper_ept_rich <- predict(ept_rich_model, upper, type = "response") - baseline_ept_rich
+  upper_ept_abun <- predict(ept_abun_model, upper, type = "response") - baseline_ept_abun
   
   combined <- data.frame(median_aspt, median_total, median_rich,
                          lower_aspt, lower_total, lower_rich, 
                          upper_aspt, upper_total, upper_rich,
                          upper_stone, upper_worm, lower_stone, lower_worm, median_stone, median_worm,
-                         median_flat, median_beet, median_dragon, median_may, median_trich,
-                         upper_flat, upper_beet, upper_dragon, upper_may, upper_trich,
-                         lower_flat, lower_beet, lower_dragon, lower_may, lower_trich)
+                         median_flat, median_dipt, median_dragon, median_may, median_trich, median_life, median_dehli, median_ept_rich, median_ept_abun,
+                         upper_flat, upper_dipt, upper_dragon, upper_may, upper_trich, upper_life, upper_dehli, upper_ept_rich, upper_ept_abun,
+                         lower_flat, lower_dipt, lower_dragon, lower_may, lower_trich, lower_life, lower_dehli, lower_ept_rich, lower_ept_abun)
   
   combined$scenario <- paste(location, climate, land,sep = ".")
   
@@ -811,7 +1026,6 @@ macro_predictions <- function(location, climate, land) {
 
 
 ```
-
 
 **Run scenarios** 
 
@@ -874,25 +1088,32 @@ write.csv(macroinvertebrate_changes, "data/macro_results.csv")
 ```
 
 
+## Validation 
 
+Estimate macroinvertebrate responses in the 2021 and 2022 data using the models I have from 2002 to 2020. Only potential hiccup is if there are two samples from the same site in 2020 and 2021 but no observations of this site any time before, in which case we can't use these as there is no estimation of the random effect (this only happened for three sites, which have been removed). 
 
+```{r}
+validation_data <- validation_data %>%
+  filter(SITE_ID != "202332") %>%
+  filter(SITE_ID != "202785") %>%
+  filter(SITE_ID != "203041") 
 
+validation_data$aspt_predicted <- predict(aspt_model, validation_data, type = "response")
+validation_data$total_predicted <- predict(total_model, validation_data, type = "response")
+validation_data$rich_predicted <- predict(rich_model, validation_data, type = "response")
+validation_data$stone_predicted <- predict(plecoptera_model, validation_data, type = "response")
+validation_data$annelid_predicted <- predict(annelid_model, validation_data, type = "response")
+validation_data$flat_predicted <- predict(flat_model, validation_data, type = "response")
+validation_data$dipt_predicted <- predict(dipt_model, validation_data, type = "response")
+validation_data$dragon_predicted <- predict(dragon_model, validation_data, type = "response")
+validation_data$mayfly_predicted <- predict(mayfly_model, validation_data, type = "response")
+validation_data$trich_predicted <- predict(trichoptera_model, validation_data, type = "response")
+validation_data$life_predicted <- predict(life_model, validation_data, type = "response")
+validation_data$dehli_predicted <- predict(dehli_model, validation_data, type = "response")
+validation_data$ept_rich_predicted <- predict(ept_rich_model, validation_data, type = "response")
+validation_data$ept_abun_predicted <- predict(ept_abun_model, validation_data, type = "response")
 
+write.csv(validation_data, "data/validation_results.csv")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+```
 

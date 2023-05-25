@@ -14,18 +14,15 @@ output:
 
 In this notebook I identify invertebrate samples taken during autumn in a given year and I join water quality data to these samples based on: 
 
-* **time**: average of water quality samples taken during the preceding summer (only between 10 and 3pm)
-* **space**: water quality site must be in the same river and within 1km
-
-I tried to add in flow data from the national river flow archive data but the flow sites were not matched up well enough with the invertebrate data. Luckily the discharge category associated to each invertebrate site was very well correlated with the flow data for the limited number of sites I had, so I can just use that.
-
+* **time**: average of water quality samples taken during the preceding summer (only between 10am and 3pm)
+* **space**: water quality site must be in the same river and within 500m
 
 ### Set-up
 
 - *Prepare R environment*
 
 ```{r, results='hide'}
-# R version 4.0.2 (2020-06-22)
+# R version 4.1.3 
 
 rm(list = ls())           # clear the environment 
 
@@ -39,14 +36,14 @@ library(tidyverse)        # organizing and manipulating data
 
 - *Choose time period and "distance" between wq and invert samples* 
 
-Repeat this for all years going back to 2005. 
+Repeat this for all years from 2002 to 2022. 
 
 ```{r}
 summer = c(6, 7, 8)                             # June, July August
 autumn = c(9, 10, 11)                           # September, October, November
 
 # Enter year we want to save
-year <- 2019
+year <- 2022
 
 # Enter max distance between wq and invert samples (in meters)
 distance = 500
@@ -58,10 +55,9 @@ distance = 500
 
 ```{r, results="hide"}
 # Read in data about the sites 
-data_site <- read.csv("data/eco/inverts/INV_OPEN_DATA_SITE_2022-02-01.csv", 
-                     header = T)
+data_site <- read.csv("data/eco/inverts/INV_OPEN_DATA_SITE_2023-05-22.csv", header = T)
 
-data_metrics <- read.csv("data/eco/inverts/INV_OPEN_DATA_METRICS_2022-02-01.csv", 
+data_metrics <- read.csv("data/eco/inverts/INV_OPEN_DATA_METRICS_2023-05-22.csv", 
                      header = T)
 
 ######## Select by time #########
@@ -71,6 +67,9 @@ data_metrics$SAMPLE_DATE <- ymd(data_metrics$SAMPLE_DATE)
 
 # Add in a SAMPLE_DATE_MONTH column 
 data_metrics$SAMPLE_DATE_MONTH <- month(data_metrics$SAMPLE_DATE)
+
+# Add in a SAMPLE_DATE_YEAR column 
+data_metrics$SAMPLE_DATE_YEAR <- year(data_metrics$SAMPLE_DATE)
 
 # Inspect distribution of samples across years and months
 #hist(data_metrics$SAMPLE_DATE_MONTH, breaks = 24)
@@ -95,8 +94,8 @@ data_site <- data_metrics %>%
   group_by(SITE_ID) %>%
   summarise(SAMPLES_PER_SITE2 = sum(counts)) %>%
   left_join(data_site, ., by = "SITE_ID") %>%
-  select(-SAMPLES_PER_SITE) %>%
-  rename(SAMPLES_PER_SITE = SAMPLES_PER_SITE2) %>%
+  dplyr::select(-SAMPLES_PER_SITE) %>%
+  dplyr::rename(SAMPLES_PER_SITE = SAMPLES_PER_SITE2) %>%
   filter(SAMPLES_PER_SITE >= 1)
 ```
 
@@ -113,6 +112,8 @@ wq_data <- list.files(path = paste("data/wq/", paste(year), "/", sep = ""),
 ```
 
 - *Import flow data and select chosen year and months* 
+
+I tried to add in flow data from the national river flow archive data but the flow sites were not matched up well enough with the invertebrate data. Luckily the discharge category associated to each invertebrate site was very well correlated with the flow data for the limited number of sites I had, so I can just use that.
 
 ```{r}
 # Load all flow data
@@ -204,8 +205,8 @@ data_site <- data_metrics %>%
   group_by(SITE_ID) %>%
   summarise(SAMPLES_PER_SITE2 = sum(counts)) %>%
   left_join(data_site, ., by = "SITE_ID") %>%
-  select(-SAMPLES_PER_SITE) %>%
-  rename(SAMPLES_PER_SITE = SAMPLES_PER_SITE2) %>%
+  dplyr::select(-SAMPLES_PER_SITE) %>%
+  dplyr::rename(SAMPLES_PER_SITE = SAMPLES_PER_SITE2) %>%
   filter(SAMPLES_PER_SITE >= 1)
 ```
 
@@ -246,7 +247,7 @@ WQ_INDICATORS <- c("Nitrogen, Total Oxidised as N",
                    "Oxygen, Dissolved, % Saturation",
                    "Ammonia un-ionised as N",
                    "Oxygen, Dissolved as O2",
-                   "Chlorophyll : Acetone Extract",
+                   #"Chlorophyll : Acetone Extract",
                    "BOD : 5 Day ATU",
                    "Phosphorus, Total as P",
                    "Solids, Suspended at 105 C")
@@ -286,7 +287,7 @@ wq_data <- st_drop_geometry(wq_data)
 
 wq_data <- wq_data %>%
   # select the variables we want and remove "@id" as this will block pivot_wider
-  select(indicator_units,
+  dplyr::select(indicator_units,
          result,
          sample.samplingPoint.easting,
          sample.samplingPoint.northing,
@@ -310,7 +311,7 @@ wq_data$month <- month(wq_data$ymd_hms)
 wq_data$hours <- hour(wq_data$ymd_hms)
 
 
-# hist(wq_data$month)
+hist(wq_data$month)
 
 
 # Select correct water quality data
@@ -329,7 +330,7 @@ wq_data <- wq_data %>%
 # Rearrange data to prepare it for summarizing (averages for each sample)
 wq_data <- wq_data %>%
   # remove variables that we don't want anymore
-  select(-c(ymd_hms, month, hours, sample.sampleDateTime)) %>%
+  dplyr::select(-c(ymd_hms, month, hours, sample.sampleDateTime)) %>%
   # get group ID and eastings and northings together to save
   unite(ID, c(sample.samplingPoint.easting,
          sample.samplingPoint.northing,
@@ -341,7 +342,7 @@ wq_data <- wq_data %>%
 wq_data <- wq_data %>%
   # get mean values for each indicator across all time points (removing NAs)
   group_by(ID) %>%
-  summarise_at(names(wq_data[2:15]), mean, na.rm = TRUE) %>%
+  summarise_at(names(wq_data[2:14]), mean, na.rm = TRUE) %>%
   # separate the coordinates and sample id into separate columns 
   separate(ID, into = c("sample.samplingPoint.easting",
                         "sample.samplingPoint.northing",
@@ -383,7 +384,7 @@ wq_data <-st_as_sf(wq_data, coords = c("sample.samplingPoint.easting",
 invert_data <- st_join(invert_data, rivers_shape, 
                        join = st_nn, maxdist = distance) %>%
   # keep only "identifier" from rivers_shape
-  select(-c("name1", "startNode", "endNode", "form", "flow", 
+  dplyr::select(-c("name1", "startNode", "endNode", "form", "flow", 
             "fictitious", "length", "name2"))
 
 
@@ -393,7 +394,7 @@ invert_data <- st_join(invert_data, rivers_shape,
 wq_data <- st_join(wq_data, rivers_shape, 
                        join = st_nn, maxdist = distance) %>%
   # keep only "identifier" from rivers_shape
-  select(-c("name1", "startNode", "endNode", "form", "flow", 
+  dplyr::select(-c("name1", "startNode", "endNode", "form", "flow", 
             "fictitious", "length", "name2"))
 
 
@@ -463,9 +464,6 @@ combined <- combined %>%
 
 ```
 
-
-
-
 - *Join flow to the joint invertebrate and water quality data based on distance*
 
 ```{r, results = "hide"}
@@ -474,9 +472,6 @@ combined <- combined %>%
 # combined.plus.flow <- st_join(combined, flow_data_average,
 #                              join = st_nn, maxdist = distance)
 ```
-
-Flow data 
-
 
 - *Filter joint data so that flow samples were taken from the same river as the inverts*
 
@@ -490,40 +485,28 @@ Flow data
 
 # plot(combined.plus.flow$average.flow, combined.plus.flow$DISCHARGE)
 
-## This suggests that I can use discharge! 
+## This shows that I can use discharge
 ```
-
-
-The flow data is not close enough to the invertebrate data. For 2010 we have 66 sites with inverts and water quality - but if we want flow as well this goes down to 9. Average flow in these 9 sites correlates very well with the discharge varible in the invert data - so I will use that data instead.
-
 
 
 ### Add in details about the invertebrates
 
 ```{r}
-invert_taxa <- read.csv("data/eco/inverts/INV_OPEN_DATA_TAXA_2022-02-01.csv", 
+invert_taxa <- read.csv("data/eco/inverts/INV_OPEN_DATA_TAXA_2023-05-22.csv", 
                      header = T)
 
 # Only keep records that have an analysis ID in "combined"
 invert_taxa <- subset(invert_taxa, invert_taxa$ANALYSIS_ID %in% combined$ANALYSIS_ID)
 
 # Only keep macroinvertebrate taxa 
-invert_taxa <- subset(invert_taxa, invert_taxa$TAXON_TYPE == "Other Macroinvertebrates")
+invert_taxa2 <- subset(invert_taxa, invert_taxa$TAXON_TYPE == "Other Macroinvertebrates")
 
 # Have a look at what groups we have
 # table(invert_taxa$TAXON_GROUP_NAME)
 
 ```
 
-Get abundances for the seven higher taxa showing the greatest change among classes in the Vaughan and Goetteli paper: 
-*Bivalvia, Hirudinea, Isopoda, Ephemeroptera, Plecoptera, Trichoptera, Diptera*
-
-
-Also calculate macroinvertebrate richness
-
-And get the total abundance of macroinvertebrates and also the richness of the EPT and the abundance of EPT. 
-
-So what I need now is to summarize the data so that for each analysis ID there is the abundance of the groups I'm interested in and the total macroinvertebrate richness (number of rows per analysis ID).
+Extract macroinvertebrate responses of interest. 
 
 ```{r}
 # Calcuate the macro richness in each analysis
@@ -550,7 +533,7 @@ invert_taxa_abundances <- invert_taxa_abundances %>%
 invert_taxa_abundances[is.na(invert_taxa_abundances)] <- 0
 
 # Only keep the main groups for abundances 
-invert_taxa_abundances <- select(invert_taxa_abundances, 
+invert_taxa_abundances <- dplyr::select(invert_taxa_abundances, 
                                  c("annelid",
                                    "crustacean",
                                    "flatworm (Turbellaria)",
@@ -582,8 +565,7 @@ ept_taxa_total_abundance <- ept %>%
 
 ```
 
-
-Last step is just to join the abundance and richness data to combined by Analysis ID 
+**Last step is just to join the abundance and richness data to combined by Analysis ID** 
 
 ```{r}
 combined_full <- left_join(combined, invert_taxa_abundances,
@@ -605,10 +587,7 @@ combined_full <- left_join(combined_full, ept_taxa_total_abundance,
 combined_full$ept_richness[is.na(combined_full$ept_richness)] <- 0
 combined_full$ept_abundance[is.na(combined_full$ept_abundance)] <- 0
 
-
-
 ```
-
 
 
 ### Save dataset for each year to analyse with GLMM
